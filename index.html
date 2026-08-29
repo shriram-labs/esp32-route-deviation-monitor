@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Route Deviation Monitor</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
   /* ===== Base reset ===== */
   * {
@@ -64,9 +65,16 @@
     margin-bottom: 10px;
   }
 
-  /* ===== Route visualization placeholder ===== */
-  .route-placeholder {
-    height: 220px;
+  /* ===== Stage 3C: Live map ===== */
+  #mapContainer {
+    height: 260px;
+    border-radius: 10px;
+    overflow: hidden;
+    /* Leaflet needs the container to have an explicit size before init */
+  }
+
+  .map-empty-message {
+    height: 260px;
     border-radius: 10px;
     background:
       repeating-linear-gradient(
@@ -87,17 +95,17 @@
     padding: 12px;
   }
 
-  .route-placeholder .pin {
+  .map-empty-message .pin {
     font-size: 26px;
   }
 
-  .route-placeholder .label {
+  .map-empty-message .label {
     font-size: 13px;
     font-weight: 600;
     color: #9aa0aa;
   }
 
-  .route-placeholder .sublabel {
+  .map-empty-message .sublabel {
     font-size: 11px;
     color: #5a6070;
   }
@@ -279,13 +287,14 @@
     <div class="trip-result" id="routeFetchResult"></div>
   </div>
 
-  <!-- ===== Route visualization placeholder (not a real map yet) ===== -->
+  <!-- ===== Live Map (Stage 3C) ===== -->
   <div class="card">
     <div class="card-title">Route / Position</div>
-    <div class="route-placeholder">
+    <div id="mapContainer" style="display:none;"></div>
+    <div class="map-empty-message" id="mapEmptyMessage">
       <div class="pin">📍</div>
-      <div class="label">Route Visualization Placeholder</div>
-      <div class="sublabel">Live map/route view will be added in a later stage</div>
+      <div class="label">No route yet</div>
+      <div class="sublabel">Set pickup and destination to generate route.</div>
     </div>
   </div>
 
@@ -330,11 +339,12 @@
     <button id="stopBtn" disabled>STOP MONITORING</button>
   </div>
 
-  <div class="footer-note">Stage 3B — Real road route via OSRM. Deviation now checks against the actual generated route.</div>
+  <div class="footer-note">Stage 3C — Live Leaflet map added. Route deviation logic unchanged.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
   /*
     STAGE 2 NOTE:
@@ -364,6 +374,107 @@
   // ----- State -----
   let watchId = null;
   let updateCount = 0;
+
+  // ===================================================================
+  // STAGE 3C: Live Leaflet map
+  // This is a visualization layer only. It does not affect the
+  // deviation algorithm, GPS logic, geocoding, or OSRM routing above -
+  // it simply reads the same variables (routeWaypoints, pickupCoords,
+  // destinationCoords) and draws them on a map.
+  // ===================================================================
+
+  const mapContainer = document.getElementById('mapContainer');
+  const mapEmptyMessage = document.getElementById('mapEmptyMessage');
+
+  let map = null;
+  let routePolyline = null;
+  let pickupMarker = null;
+  let destinationMarker = null;
+  let liveMarker = null;
+
+  // Lazily creates the Leaflet map the first time it's actually needed,
+  // since the container is hidden (display:none) until a route exists.
+  function ensureMapInitialized() {
+    if (map !== null) {
+      return;
+    }
+
+    mapEmptyMessage.style.display = 'none';
+    mapContainer.style.display = 'block';
+
+    map = L.map('mapContainer', {
+      zoomControl: true,
+      attributionControl: true
+    }).setView([17.9784, 79.5941], 10); // reasonable default view (Telangana region)
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Leaflet sometimes needs a nudge to size itself correctly once its
+    // container becomes visible after being display:none.
+    setTimeout(function () {
+      map.invalidateSize();
+    }, 200);
+  }
+
+  // Draws (or redraws) the pickup marker, destination marker, and route
+  // polyline, then fits the map view to the route bounds.
+  function drawRouteOnMap(pickup, destination, waypoints) {
+    ensureMapInitialized();
+
+    if (pickupMarker) {
+      map.removeLayer(pickupMarker);
+    }
+    if (destinationMarker) {
+      map.removeLayer(destinationMarker);
+    }
+    if (routePolyline) {
+      map.removeLayer(routePolyline);
+    }
+
+    pickupMarker = L.marker([pickup.lat, pickup.lon]).addTo(map).bindPopup('Pickup');
+    destinationMarker = L.marker([destination.lat, destination.lon]).addTo(map).bindPopup('Destination');
+
+    const latLngs = waypoints.map(function (point) {
+      return [point.lat, point.lon];
+    });
+
+    routePolyline = L.polyline(latLngs, { color: '#2563eb', weight: 4 }).addTo(map);
+
+    map.fitBounds(routePolyline.getBounds(), { padding: [24, 24] });
+  }
+
+  // Updates (or creates) the live GPS marker on the map. Called from
+  // handleSuccess() below whenever a new GPS position arrives.
+  function updateLiveMarkerOnMap(lat, lon) {
+    // If no route has been generated yet, there's no map to draw on.
+    if (map === null) {
+      return;
+    }
+
+    if (liveMarker === null) {
+      liveMarker = L.circleMarker([lat, lon], {
+        radius: 8,
+        color: '#ffffff',
+        weight: 2,
+        fillColor: '#4ade80',
+        fillOpacity: 1
+      }).addTo(map).bindPopup('You are here');
+    } else {
+      liveMarker.setLatLng([lat, lon]);
+    }
+  }
+
+  // Removes the live GPS marker but keeps the route visible.
+  // Called from stopMonitoring() below.
+  function removeLiveMarkerFromMap() {
+    if (map !== null && liveMarker !== null) {
+      map.removeLayer(liveMarker);
+      liveMarker = null;
+    }
+  }
 
   // ----- Route configuration -----
   //
@@ -515,6 +626,10 @@
     setGpsStatus('dot-active', 'Active');
     clearError();
 
+    // Stage 3C: keep the live map marker in sync with GPS updates.
+    // This is purely visual and does not affect the deviation check below.
+    updateLiveMarkerOnMap(lat, lon);
+
     // ----- Route deviation check -----
     const distance = distanceToRoute(lat, lon, routeWaypoints);
 
@@ -590,6 +705,9 @@
     setRouteStatus('dot-notstarted', 'Not Started');
     routeSub.textContent = 'Distance from route: -- | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
     clearError();
+
+    // Stage 3C: remove the live position marker but keep the route line visible.
+    removeLiveMarkerFromMap();
 
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -759,7 +877,10 @@
 
       routeFetchResult.innerHTML =
         '<span style="color:#4ade80;">Road route loaded:</span> ' + distanceKm + ' km, ~' + durationMin + ' min<br>' +
-        '<span style="color:#5a6070;">' + routeWaypoints.length + ' route points now used for deviation detection. Map view comes in the next stage.</span>';
+        '<span style="color:#5a6070;">' + routeWaypoints.length + ' route points now used for deviation detection.</span>';
+
+      // Stage 3C: draw the route, pickup, and destination on the live map.
+      drawRouteOnMap(pickup, destination, routeWaypoints);
 
     } catch (err) {
       routeFetchResult.innerHTML =
