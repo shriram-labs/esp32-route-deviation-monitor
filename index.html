@@ -276,6 +276,7 @@
 
     <div class="trip-result" id="tripResult">No locations set yet.</div>
     <div class="trip-error" id="tripError"></div>
+    <div class="trip-result" id="routeFetchResult"></div>
   </div>
 
   <!-- ===== Route visualization placeholder (not a real map yet) ===== -->
@@ -329,7 +330,7 @@
     <button id="stopBtn" disabled>STOP MONITORING</button>
   </div>
 
-  <div class="footer-note">Stage 3A — Pickup/destination geocoding added. Route deviation still uses the manual test route below.</div>
+  <div class="footer-note">Stage 3B — Real road route via OSRM. Deviation now checks against the actual generated route.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
@@ -366,13 +367,12 @@
 
   // ----- Route configuration -----
   //
-  // PLACEHOLDER WAYPOINTS: these currently sit near Khammam, Telangana as a
-  // stand-in path. Replace these with real coordinates of the actual route
-  // you plan to test (e.g. record them by walking the path once with the
-  // Stage 1 GPS continuity test open, or pick points from Google Maps).
-  // The route is just an ordered list of {lat, lon} points forming a path
-  // from the first point to the last.
-  const routeWaypoints = [
+  // FALLBACK WAYPOINTS: these are the original Stage 3 placeholder points
+  // near Khammam, kept only as a fallback in case OSRM routing fails or
+  // hasn't been run yet (e.g. before pressing SET LOCATIONS). Once OSRM
+  // successfully returns a route in Stage 3B, this array is REPLACED with
+  // the real road route between the chosen pickup and destination.
+  let routeWaypoints = [
     { lat: 17.2473, lon: 80.1514 },
     { lat: 17.2490, lon: 80.1540 },
     { lat: 17.2510, lon: 80.1565 },
@@ -611,6 +611,7 @@
   const geocodeBtn = document.getElementById('geocodeBtn');
   const tripResult = document.getElementById('tripResult');
   const tripError = document.getElementById('tripError');
+  const routeFetchResult = document.getElementById('routeFetchResult');
 
   // Stores the geocoded coordinates so later stages (3B onwards) can use them.
   // Not used by the deviation algorithm yet.
@@ -695,14 +696,74 @@
 
       tripResult.innerHTML =
         '<strong>Pickup:</strong> ' + pickupCoords.lat.toFixed(6) + ', ' + pickupCoords.lon.toFixed(6) + '<br>' +
-        '<strong>Destination:</strong> ' + destinationCoords.lat.toFixed(6) + ', ' + destinationCoords.lon.toFixed(6) +
-        '<br><span style="color:#5a6070;">Route generation comes in the next stage.</span>';
+        '<strong>Destination:</strong> ' + destinationCoords.lat.toFixed(6) + ', ' + destinationCoords.lon.toFixed(6);
+
+      // ----- Stage 3B: fetch the real road route from OSRM -----
+      routeFetchResult.textContent = 'Fetching road route...';
+      await fetchRouteFromOSRM(pickupCoords, destinationCoords);
+
     } catch (err) {
       showTripError('Something went wrong while looking up locations. Please check your internet connection and try again.');
       tripResult.textContent = 'No locations set yet.';
     } finally {
       geocodeBtn.disabled = false;
       geocodeBtn.textContent = 'SET LOCATIONS';
+    }
+  }
+
+  // ===================================================================
+  // STAGE 3B: OSRM road routing
+  // Takes pickup/destination coordinates and asks the free public OSRM
+  // routing server for an actual road-following route. On success, this
+  // REPLACES routeWaypoints (previously the hardcoded Khammam fallback)
+  // with the real route, so the existing deviation algorithm below now
+  // checks distance against the real road path instead of the fallback.
+  // No map is drawn yet - that's Stage 3C.
+  // ===================================================================
+
+  async function fetchRouteFromOSRM(pickup, destination) {
+    // OSRM expects coordinates as lon,lat (opposite order from what we store)
+    const coordsParam =
+      pickup.lon + ',' + pickup.lat + ';' + destination.lon + ',' + destination.lat;
+
+    const url =
+      'https://router.project-osrm.org/route/v1/driving/' + coordsParam +
+      '?overview=full&geometries=geojson';
+
+    try {
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error('OSRM request failed (' + response.status + ')');
+      }
+
+      const data = await response.json();
+
+      if (!data.routes || data.routes.length === 0) {
+        routeFetchResult.innerHTML =
+          '<span style="color:#f87171;">No road route found between these locations. Keeping previous route for deviation checks.</span>';
+        return;
+      }
+
+      // GeoJSON coordinates come back as [lon, lat] pairs, in road order.
+      const coordinates = data.routes[0].geometry.coordinates;
+
+      // Convert to our internal {lat, lon} waypoint format and replace
+      // the route used by the deviation algorithm.
+      routeWaypoints = coordinates.map(function (pair) {
+        return { lat: pair[1], lon: pair[0] };
+      });
+
+      const distanceKm = (data.routes[0].distance / 1000).toFixed(2);
+      const durationMin = (data.routes[0].duration / 60).toFixed(1);
+
+      routeFetchResult.innerHTML =
+        '<span style="color:#4ade80;">Road route loaded:</span> ' + distanceKm + ' km, ~' + durationMin + ' min<br>' +
+        '<span style="color:#5a6070;">' + routeWaypoints.length + ' route points now used for deviation detection. Map view comes in the next stage.</span>';
+
+    } catch (err) {
+      routeFetchResult.innerHTML =
+        '<span style="color:#f87171;">Could not fetch road route (network or OSRM issue). Keeping previous route for deviation checks.</span>';
     }
   }
 
