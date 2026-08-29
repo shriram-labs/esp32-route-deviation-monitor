@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPS Continuity Test</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --text: #e2e8f0;
+    --dim: #94a3b8;
+    --accent: #38bdf8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Roboto, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 16px;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.2rem;
+    margin: 8px 0 4px;
+  }
+  .subtitle {
+    color: var(--dim);
+    font-size: 0.85rem;
+    margin-bottom: 16px;
+  }
+  #status-banner {
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    background: #334155;
+    border-left: 5px solid var(--dim);
+  }
+  #status-banner.ok { border-left-color: var(--ok); }
+  #status-banner.warn { border-left-color: var(--warn); }
+  #status-banner.bad { border-left-color: var(--bad); }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .card {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .card .label {
+    color: var(--dim);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+  .card .value {
+    font-size: 1.05rem;
+    font-weight: 600;
+    word-break: break-all;
+  }
+  .card.full { grid-column: 1 / -1; }
+
+  button {
+    width: 100%;
+    padding: 14px;
+    font-size: 1rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #0f172a;
+    margin-bottom: 12px;
+  }
+  button:disabled {
+    background: #475569;
+    color: var(--dim);
+  }
+
+  #log {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: monospace;
+    font-size: 0.78rem;
+    max-height: 220px;
+    overflow-y: auto;
+    color: var(--dim);
+  }
+  #log div { margin-bottom: 3px; white-space: pre-wrap; }
+  #log .event { color: var(--accent); }
+
+  .note {
+    font-size: 0.78rem;
+    color: var(--dim);
+    margin-top: 14px;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+
+<h1>GPS Continuity Test</h1>
+<div class="subtitle">Checks whether your phone keeps sending GPS updates when the screen locks or you switch apps.</div>
+
+<div id="status-banner">Not started</div>
+
+<button id="startBtn">Start GPS Tracking</button>
+
+<div class="grid">
+  <div class="card">
+    <div class="label">Latitude</div>
+    <div class="value" id="lat">--</div>
+  </div>
+  <div class="card">
+    <div class="label">Longitude</div>
+    <div class="value" id="lon">--</div>
+  </div>
+  <div class="card">
+    <div class="label">Accuracy</div>
+    <div class="value" id="acc">--</div>
+  </div>
+  <div class="card">
+    <div class="label">Last Update</div>
+    <div class="value" id="lastUpdate">--</div>
+  </div>
+  <div class="card">
+    <div class="label">Update Count</div>
+    <div class="value" id="count">0</div>
+  </div>
+  <div class="card">
+    <div class="label">Time Since Last Fix</div>
+    <div class="value" id="sinceLast">--</div>
+  </div>
+  <div class="card full">
+    <div class="label">Distance Moved (from start)</div>
+    <div class="value" id="distance">0 m</div>
+  </div>
+</div>
+
+<div class="label" style="margin-bottom:6px;">Event Log</div>
+<div id="log"><div>Waiting to start...</div></div>
+
+<div class="note">
+  Test steps: 1) Tap Start and allow location access. 2) Walk around — confirm lat/lon and update count keep changing. 3) Try: screen on + app open, then switch to another app, then lock the screen. 4) Come back and check the log for gaps or a "visibility changed" / "page hidden" entry, and whether update count kept rising.
+</div>
+
+<script>
+  let watchId = null;
+  let updateCount = 0;
+  let startCoords = null;
+  let lastUpdateTime = null;
+
+  const banner = document.getElementById('status-banner');
+  const latEl = document.getElementById('lat');
+  const lonEl = document.getElementById('lon');
+  const accEl = document.getElementById('acc');
+  const lastUpdateEl = document.getElementById('lastUpdate');
+  const countEl = document.getElementById('count');
+  const sinceLastEl = document.getElementById('sinceLast');
+  const distanceEl = document.getElementById('distance');
+  const logEl = document.getElementById('log');
+  const startBtn = document.getElementById('startBtn');
+
+  function log(msg, isEvent) {
+    const line = document.createElement('div');
+    const time = new Date().toLocaleTimeString();
+    line.textContent = `[${time}] ${msg}`;
+    if (isEvent) line.classList.add('event');
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function setBanner(text, cls) {
+    banner.textContent = text;
+    banner.className = cls;
+  }
+
+  // Haversine distance in meters
+  function distanceMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const toRad = d => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat/2)**2 +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+              Math.sin(dLon/2)**2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  }
+
+  function handlePosition(pos) {
+    updateCount++;
+    const { latitude, longitude, accuracy } = pos.coords;
+    lastUpdateTime = new Date();
+
+    latEl.textContent = latitude.toFixed(6);
+    lonEl.textContent = longitude.toFixed(6);
+    accEl.textContent = accuracy.toFixed(1) + ' m';
+    lastUpdateEl.textContent = lastUpdateTime.toLocaleTimeString();
+    countEl.textContent = updateCount;
+
+    if (!startCoords) {
+      startCoords = { latitude, longitude };
+      distanceEl.textContent = '0 m';
+    } else {
+      const d = distanceMeters(startCoords.latitude, startCoords.longitude, latitude, longitude);
+      distanceEl.textContent = d.toFixed(1) + ' m';
+    }
+
+    setBanner(`GPS active — ${updateCount} update(s) received`, 'ok');
+    log(`Fix #${updateCount}: ${latitude.toFixed(6)}, ${longitude.toFixed(6)} (±${accuracy.toFixed(0)}m)`);
+  }
+
+  function handleError(err) {
+    setBanner('GPS error: ' + err.message, 'bad');
+    log('ERROR: ' + err.message, true);
+  }
+
+  function startTracking() {
+    if (!navigator.geolocation) {
+      setBanner('Geolocation not supported on this browser', 'bad');
+      return;
+    }
+    setBanner('Requesting location permission...', 'warn');
+    log('Starting watchPosition...', true);
+
+    watchId = navigator.geolocation.watchPosition(handlePosition, handleError, {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 15000
+    });
+
+    startBtn.disabled = true;
+    startBtn.textContent = 'Tracking...';
+  }
+
+  startBtn.addEventListener('click', startTracking);
+
+  // Track visibility changes so you can see exactly when the tab
+  // goes to background / screen locks, and whether updates continue after.
+  document.addEventListener('visibilitychange', () => {
+    log(`Page visibility changed: ${document.visibilityState}`, true);
+  });
+
+  // Update "time since last fix" every second, and warn if it's been a while.
+  setInterval(() => {
+    if (!lastUpdateTime) return;
+    const secs = Math.floor((new Date() - lastUpdateTime) / 1000);
+    sinceLastEl.textContent = secs + ' s';
+    if (secs > 20 && secs <= 60) {
+      setBanner(`No update in ${secs}s — GPS may be throttled`, 'warn');
+    } else if (secs > 60) {
+      setBanner(`No update in ${secs}s — GPS likely stopped`, 'bad');
+    }
+  }, 1000);
+</script>
+
+</body>
+</html>
