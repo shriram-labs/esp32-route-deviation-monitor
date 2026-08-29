@@ -245,37 +245,154 @@
     <button id="stopBtn" disabled>STOP MONITORING</button>
   </div>
 
-  <div class="footer-note">Stage 1 — UI shell only. No GPS, deviation, or ESP32 logic active yet.</div>
+  <div class="footer-note">Stage 2 — Live GPS tracking active. Route deviation and ESP32 communication not yet implemented.</div>
+  <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
 
 <script>
   /*
-    STAGE 1 NOTE:
-    This script intentionally does almost nothing yet.
-    It only demonstrates that Start/Stop buttons can toggle each other,
-    so the layout and interaction shell are ready for real logic to be
-    wired in during later stages (GPS integration, deviation algorithm,
-    ESP32 simulation).
+    STAGE 2 NOTE:
+    This script now implements REAL GPS tracking using
+    navigator.geolocation.watchPosition().
 
-    No geolocation, no distance calculation, no ESP32 communication
-    is implemented here on purpose.
+    Still intentionally NOT implemented (per Stage 2 scope):
+    - Route deviation calculation (Route Status stays a placeholder)
+    - ESP32 communication (ESP32 stays in Simulation Mode)
+    - Any map or external API
   */
 
+  // ----- Element references -----
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
 
-  startBtn.addEventListener('click', function () {
+  const gpsDot = document.getElementById('gpsDot');
+  const gpsLabel = document.getElementById('gpsLabel');
+  const gpsSub = document.getElementById('gpsSub');
+
+  const routeDot = document.getElementById('routeDot');
+  const routeLabel = document.getElementById('routeLabel');
+
+  const errorBox = document.getElementById('errorBox');
+
+  // ----- State -----
+  let watchId = null;
+  let updateCount = 0;
+
+  // ----- Helpers -----
+
+  // Swap the GPS status dot + label together (keeps class list clean)
+  function setGpsStatus(dotClass, labelText) {
+    gpsDot.className = 'dot ' + dotClass;
+    gpsLabel.textContent = labelText;
+  }
+
+  // Swap the Route status dot + label together
+  function setRouteStatus(dotClass, labelText) {
+    routeDot.className = 'dot ' + dotClass;
+    routeLabel.textContent = labelText;
+  }
+
+  function formatTime(date) {
+    return date.toLocaleTimeString('en-GB'); // 24-hour format, e.g. 22:14:31
+  }
+
+  function showError(message) {
+    errorBox.style.display = 'block';
+    errorBox.textContent = message;
+  }
+
+  function clearError() {
+    errorBox.style.display = 'none';
+    errorBox.textContent = '';
+  }
+
+  // ----- Geolocation callbacks -----
+
+  function handleSuccess(position) {
+    const lat = position.coords.latitude;
+    const lon = position.coords.longitude;
+    const accuracy = position.coords.accuracy;
+
+    updateCount++;
+
+    // Update the GPS card: accuracy line also carries lat/lon/updates/timestamp
+    // so we don't need to change the existing card layout from Stage 1.
+    gpsSub.innerHTML =
+      'Accuracy: ±' + accuracy.toFixed(1) + ' m<br>' +
+      'Lat: ' + lat.toFixed(6) + ' &nbsp; Lon: ' + lon.toFixed(6) + '<br>' +
+      'Updates: ' + updateCount + ' &nbsp; Last update: ' + formatTime(new Date());
+
+    setGpsStatus('dot-active', 'Active');
+    clearError();
+
+    // Route Status becomes "Monitoring" once GPS is actively feeding data.
+    // Actual deviation logic is NOT implemented yet (Stage 3).
+    setRouteStatus('dot-onroute', 'Monitoring');
+  }
+
+  function handleError(error) {
+    setGpsStatus('dot-error', 'Error');
+
+    switch (error.code) {
+      case error.PERMISSION_DENIED:
+        showError('Permission denied. Please allow location access for this page and try again.');
+        break;
+      case error.POSITION_UNAVAILABLE:
+        showError('Position unavailable. Try moving to an open area outdoors.');
+        break;
+      case error.TIMEOUT:
+        showError('Request timed out. GPS took too long to respond.');
+        break;
+      default:
+        showError('An unknown error occurred while retrieving location.');
+        break;
+    }
+  }
+
+  // ----- Start / Stop -----
+
+  function startMonitoring() {
+    if (!navigator.geolocation) {
+      showError('Geolocation is not supported by this browser.');
+      return;
+    }
+
+    updateCount = 0;
+    clearError();
+    setGpsStatus('dot-waiting', 'Waiting');
+    gpsSub.textContent = 'Accuracy: -- m';
+    setRouteStatus('dot-notstarted', 'Not Started');
+
+    const options = {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 15000
+    };
+
+    watchId = navigator.geolocation.watchPosition(handleSuccess, handleError, options);
+
     startBtn.disabled = true;
     stopBtn.disabled = false;
-    // Future stages will hook real GPS/route/ESP32 logic in here.
-  });
+  }
 
-  stopBtn.addEventListener('click', function () {
+  function stopMonitoring() {
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+
+    setGpsStatus('dot-waiting', 'Waiting');
+    gpsSub.textContent = 'Accuracy: -- m';
+    setRouteStatus('dot-notstarted', 'Not Started');
+    clearError();
+
     startBtn.disabled = false;
     stopBtn.disabled = true;
-    // Future stages will hook real "stop tracking" logic in here.
-  });
+  }
+
+  startBtn.addEventListener('click', startMonitoring);
+  stopBtn.addEventListener('click', stopMonitoring);
 </script>
 
 </body>
