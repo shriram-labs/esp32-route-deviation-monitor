@@ -1,1 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Route Deviation Monitor</title>
+<style>
+  /* ===== Base reset ===== */
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #0f1115;
+    color: #eaeaea;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 16px;
+  }
+
+  .app {
+    width: 100%;
+    max-width: 460px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /* ===== Header ===== */
+  .header {
+    text-align: center;
+    padding: 18px 10px 4px;
+  }
+
+  .header h1 {
+    font-size: 19px;
+    letter-spacing: 0.5px;
+    color: #ffffff;
+  }
+
+  .header p {
+    font-size: 12.5px;
+    color: #9aa0aa;
+    margin-top: 4px;
+  }
+
+  /* ===== Generic card ===== */
+  .card {
+    background-color: #1a1d24;
+    border: 1px solid #23262e;
+    border-radius: 12px;
+    padding: 16px;
+  }
+
+  .card-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #9aa0aa;
+    margin-bottom: 10px;
+  }
+
+  /* ===== Route visualization placeholder ===== */
+  .route-placeholder {
+    height: 220px;
+    border-radius: 10px;
+    background:
+      repeating-linear-gradient(
+        45deg,
+        #1e222a,
+        #1e222a 10px,
+        #191c23 10px,
+        #191c23 20px
+      );
+    border: 1px dashed #33384280;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: #6b7280;
+    text-align: center;
+    padding: 12px;
+  }
+
+  .route-placeholder .pin {
+    font-size: 26px;
+  }
+
+  .route-placeholder .label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #9aa0aa;
+  }
+
+  .route-placeholder .sublabel {
+    font-size: 11px;
+    color: #5a6070;
+  }
+
+  /* ===== Status rows (shared by GPS / Route / ESP32 cards) ===== */
+  .status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .status-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* Dot color variants - controlled by class, ready for JS to swap later */
+  .dot-waiting   { background-color: #6b7280; }
+  .dot-active    { background-color: #4ade80; }
+  .dot-error     { background-color: #f87171; }
+  .dot-notstarted{ background-color: #6b7280; }
+  .dot-onroute   { background-color: #4ade80; }
+  .dot-deviated  { background-color: #f87171; }
+  .dot-simulated { background-color: #facc15; }
+  .dot-connected { background-color: #4ade80; }
+  .dot-alert     { background-color: #f87171; }
+
+  .status-label {
+    font-size: 14.5px;
+    font-weight: 600;
+  }
+
+  .status-sub {
+    font-size: 12px;
+    color: #9aa0aa;
+    margin-top: 6px;
+  }
+
+  /* ===== Buttons ===== */
+  .buttons {
+    display: flex;
+    gap: 10px;
+  }
+
+  button {
+    flex: 1;
+    padding: 15px;
+    font-size: 15px;
+    font-weight: bold;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    letter-spacing: 0.3px;
+  }
+
+  #startBtn {
+    background-color: #22c55e;
+    color: #06210f;
+  }
+
+  #stopBtn {
+    background-color: #2a2d35;
+    color: #9aa0aa;
+  }
+
+  #stopBtn:disabled,
+  #startBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .footer-note {
+    text-align: center;
+    font-size: 11px;
+    color: #4b5060;
+    padding: 6px 0 4px;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ===== Header ===== -->
+  <div class="header">
+    <h1>ROUTE DEVIATION MONITOR</h1>
+    <p>GPS-Based Intelligent Monitoring System</p>
+  </div>
+
+  <!-- ===== Route visualization placeholder (not a real map yet) ===== -->
+  <div class="card">
+    <div class="card-title">Route / Position</div>
+    <div class="route-placeholder">
+      <div class="pin">📍</div>
+      <div class="label">Route Visualization Placeholder</div>
+      <div class="sublabel">Live map/route view will be added in a later stage</div>
+    </div>
+  </div>
+
+  <!-- ===== GPS Status Card ===== -->
+  <div class="card">
+    <div class="card-title">GPS Status</div>
+    <div class="status-row">
+      <div class="status-left">
+        <span class="dot dot-waiting" id="gpsDot"></span>
+        <span class="status-label" id="gpsLabel">Waiting</span>
+      </div>
+    </div>
+    <div class="status-sub" id="gpsSub">Accuracy: -- m</div>
+  </div>
+
+  <!-- ===== Route Status Card ===== -->
+  <div class="card">
+    <div class="card-title">Route Status</div>
+    <div class="status-row">
+      <div class="status-left">
+        <span class="dot dot-notstarted" id="routeDot"></span>
+        <span class="status-label" id="routeLabel">Not Started</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== ESP32 Status Card ===== -->
+  <div class="card">
+    <div class="card-title">ESP32 Status</div>
+    <div class="status-row">
+      <div class="status-left">
+        <span class="dot dot-simulated" id="espDot"></span>
+        <span class="status-label" id="espLabel">Simulation Mode</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Controls ===== -->
+  <div class="buttons">
+    <button id="startBtn">START MONITORING</button>
+    <button id="stopBtn" disabled>STOP MONITORING</button>
+  </div>
+
+  <div class="footer-note">Stage 1 — UI shell only. No GPS, deviation, or ESP32 logic active yet.</div>
+
+</div>
+
+<script>
+  /*
+    STAGE 1 NOTE:
+    This script intentionally does almost nothing yet.
+    It only demonstrates that Start/Stop buttons can toggle each other,
+    so the layout and interaction shell are ready for real logic to be
+    wired in during later stages (GPS integration, deviation algorithm,
+    ESP32 simulation).
+
+    No geolocation, no distance calculation, no ESP32 communication
+    is implemented here on purpose.
+  */
+
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+
+  startBtn.addEventListener('click', function () {
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    // Future stages will hook real GPS/route/ESP32 logic in here.
+  });
+
+  stopBtn.addEventListener('click', function () {
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    // Future stages will hook real "stop tracking" logic in here.
+  });
+</script>
+
+</body>
+</html>
