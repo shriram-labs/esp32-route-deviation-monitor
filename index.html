@@ -183,6 +183,69 @@
     color: #4b5060;
     padding: 6px 0 4px;
   }
+
+  /* ===== Trip Details (Stage 3A) ===== */
+  .field-group {
+    margin-bottom: 12px;
+  }
+
+  .field-group label {
+    display: block;
+    font-size: 12px;
+    color: #9aa0aa;
+    margin-bottom: 6px;
+  }
+
+  .field-group input {
+    width: 100%;
+    padding: 11px 12px;
+    background-color: #12141a;
+    border: 1px solid #2a2d35;
+    border-radius: 8px;
+    color: #eaeaea;
+    font-size: 14px;
+  }
+
+  .field-group input:focus {
+    outline: none;
+    border-color: #4b5563;
+  }
+
+  #geocodeBtn {
+    width: 100%;
+    background-color: #2563eb;
+    color: #ffffff;
+    padding: 13px;
+    font-size: 14px;
+    font-weight: bold;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+
+  #geocodeBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .trip-result {
+    margin-top: 12px;
+    font-size: 12.5px;
+    color: #9aa0aa;
+    line-height: 1.6;
+  }
+
+  .trip-result strong {
+    color: #eaeaea;
+  }
+
+  .trip-error {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #f87171;
+    display: none;
+  }
 </style>
 </head>
 <body>
@@ -193,6 +256,26 @@
   <div class="header">
     <h1>ROUTE DEVIATION MONITOR</h1>
     <p>GPS-Based Intelligent Monitoring System</p>
+  </div>
+
+  <!-- ===== Trip Details Card (Stage 3A - pickup/destination + geocoding) ===== -->
+  <div class="card">
+    <div class="card-title">Trip Details</div>
+
+    <div class="field-group">
+      <label for="pickupInput">Pickup Location</label>
+      <input type="text" id="pickupInput" placeholder="e.g. Khammam Bus Stand">
+    </div>
+
+    <div class="field-group">
+      <label for="destinationInput">Destination</label>
+      <input type="text" id="destinationInput" placeholder="e.g. Khammam Railway Station">
+    </div>
+
+    <button id="geocodeBtn">SET LOCATIONS</button>
+
+    <div class="trip-result" id="tripResult">No locations set yet.</div>
+    <div class="trip-error" id="tripError"></div>
   </div>
 
   <!-- ===== Route visualization placeholder (not a real map yet) ===== -->
@@ -226,6 +309,7 @@
         <span class="status-label" id="routeLabel">Not Started</span>
       </div>
     </div>
+    <div class="status-sub" id="routeSub">Distance from route: -- &nbsp; | &nbsp; Threshold: 30 m</div>
   </div>
 
   <!-- ===== ESP32 Status Card ===== -->
@@ -245,7 +329,7 @@
     <button id="stopBtn" disabled>STOP MONITORING</button>
   </div>
 
-  <div class="footer-note">Stage 2 — Live GPS tracking active. Route deviation and ESP32 communication not yet implemented.</div>
+  <div class="footer-note">Stage 3A — Pickup/destination geocoding added. Route deviation still uses the manual test route below.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
@@ -272,12 +356,117 @@
 
   const routeDot = document.getElementById('routeDot');
   const routeLabel = document.getElementById('routeLabel');
+  const routeSub = document.getElementById('routeSub');
 
   const errorBox = document.getElementById('errorBox');
 
   // ----- State -----
   let watchId = null;
   let updateCount = 0;
+
+  // ----- Route configuration -----
+  //
+  // PLACEHOLDER WAYPOINTS: these currently sit near Khammam, Telangana as a
+  // stand-in path. Replace these with real coordinates of the actual route
+  // you plan to test (e.g. record them by walking the path once with the
+  // Stage 1 GPS continuity test open, or pick points from Google Maps).
+  // The route is just an ordered list of {lat, lon} points forming a path
+  // from the first point to the last.
+  const routeWaypoints = [
+    { lat: 17.2473, lon: 80.1514 },
+    { lat: 17.2490, lon: 80.1540 },
+    { lat: 17.2510, lon: 80.1565 },
+    { lat: 17.2530, lon: 80.1590 }
+  ];
+
+  // Deviation threshold in metres. Adjustable constant for now;
+  // could later be exposed as a UI control.
+  const DEVIATION_THRESHOLD_METERS = 30;
+
+  // ----- Distance calculation helpers -----
+
+  // Haversine distance between two lat/lon points, in metres.
+  function haversineDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371000; // Earth's radius in metres
+    const toRad = (deg) => (deg * Math.PI) / 180;
+
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+  // Projects lat/lon points to a local flat (x, y) plane in metres,
+  // using an equirectangular approximation centred on refLat.
+  // This is accurate enough for short distances (tens to hundreds of
+  // metres), which is the scale we care about for route deviation.
+  function toLocalXY(lat, lon, refLat) {
+    const R = 6371000;
+    const toRad = (deg) => (deg * Math.PI) / 180;
+    const x = toRad(lon) * Math.cos(toRad(refLat)) * R;
+    const y = toRad(lat) * R;
+    return { x, y };
+  }
+
+  // Shortest distance (metres) from point P to the line segment A-B,
+  // computed in the local flat projection.
+  function pointToSegmentDistance(px, py, ax, ay, bx, by) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lengthSquared = dx * dx + dy * dy;
+
+    let t;
+    if (lengthSquared === 0) {
+      // A and B are the same point
+      t = 0;
+    } else {
+      t = ((px - ax) * dx + (py - ay) * dy) / lengthSquared;
+      t = Math.max(0, Math.min(1, t)); // clamp to the segment, not the infinite line
+    }
+
+    const closestX = ax + t * dx;
+    const closestY = ay + t * dy;
+
+    const distX = px - closestX;
+    const distY = py - closestY;
+    return Math.sqrt(distX * distX + distY * distY);
+  }
+
+  // Computes the shortest distance (metres) from the current GPS position
+  // to the route, by checking distance to every segment of the route
+  // polyline and keeping the minimum.
+  function distanceToRoute(lat, lon, waypoints) {
+    if (!waypoints || waypoints.length === 0) {
+      return null;
+    }
+
+    if (waypoints.length === 1) {
+      return haversineDistance(lat, lon, waypoints[0].lat, waypoints[0].lon);
+    }
+
+    // Use the current point's latitude as the reference for projection
+    const refLat = lat;
+    const p = toLocalXY(lat, lon, refLat);
+
+    let minDistance = Infinity;
+
+    for (let i = 0; i < waypoints.length - 1; i++) {
+      const a = toLocalXY(waypoints[i].lat, waypoints[i].lon, refLat);
+      const b = toLocalXY(waypoints[i + 1].lat, waypoints[i + 1].lon, refLat);
+      const dist = pointToSegmentDistance(p.x, p.y, a.x, a.y, b.x, b.y);
+      if (dist < minDistance) {
+        minDistance = dist;
+      }
+    }
+
+    return minDistance;
+  }
 
   // ----- Helpers -----
 
@@ -326,9 +515,22 @@
     setGpsStatus('dot-active', 'Active');
     clearError();
 
-    // Route Status becomes "Monitoring" once GPS is actively feeding data.
-    // Actual deviation logic is NOT implemented yet (Stage 3).
-    setRouteStatus('dot-onroute', 'Monitoring');
+    // ----- Route deviation check -----
+    const distance = distanceToRoute(lat, lon, routeWaypoints);
+
+    if (distance === null) {
+      // No route defined - shouldn't normally happen since routeWaypoints is hardcoded above
+      setRouteStatus('dot-notstarted', 'Not Started');
+      routeSub.textContent = 'Distance from route: -- | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
+    } else if (distance <= DEVIATION_THRESHOLD_METERS) {
+      setRouteStatus('dot-onroute', 'On Route');
+      routeSub.textContent =
+        'Distance from route: ' + distance.toFixed(1) + ' m | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
+    } else {
+      setRouteStatus('dot-deviated', 'Deviated');
+      routeSub.textContent =
+        'Distance from route: ' + distance.toFixed(1) + ' m | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
+    }
   }
 
   function handleError(error) {
@@ -363,6 +565,7 @@
     setGpsStatus('dot-waiting', 'Waiting');
     gpsSub.textContent = 'Accuracy: -- m';
     setRouteStatus('dot-notstarted', 'Not Started');
+    routeSub.textContent = 'Distance from route: -- | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
 
     const options = {
       enableHighAccuracy: true,
@@ -385,6 +588,7 @@
     setGpsStatus('dot-waiting', 'Waiting');
     gpsSub.textContent = 'Accuracy: -- m';
     setRouteStatus('dot-notstarted', 'Not Started');
+    routeSub.textContent = 'Distance from route: -- | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
     clearError();
 
     startBtn.disabled = false;
@@ -393,6 +597,116 @@
 
   startBtn.addEventListener('click', startMonitoring);
   stopBtn.addEventListener('click', stopMonitoring);
+
+  // ===================================================================
+  // STAGE 3A: Pickup / Destination geocoding
+  // This section is intentionally independent of the GPS/deviation logic
+  // above. It only converts place names into lat/lon using the free
+  // OpenStreetMap Nominatim service. It does NOT feed into routeWaypoints
+  // or the deviation algorithm yet - that comes in later stages (3B-3D).
+  // ===================================================================
+
+  const pickupInput = document.getElementById('pickupInput');
+  const destinationInput = document.getElementById('destinationInput');
+  const geocodeBtn = document.getElementById('geocodeBtn');
+  const tripResult = document.getElementById('tripResult');
+  const tripError = document.getElementById('tripError');
+
+  // Stores the geocoded coordinates so later stages (3B onwards) can use them.
+  // Not used by the deviation algorithm yet.
+  let pickupCoords = null;
+  let destinationCoords = null;
+
+  function showTripError(message) {
+    tripError.style.display = 'block';
+    tripError.textContent = message;
+  }
+
+  function clearTripError() {
+    tripError.style.display = 'none';
+    tripError.textContent = '';
+  }
+
+  // Calls the free Nominatim search API to turn a place name into
+  // { lat, lon }. No API key required. Returns null if not found.
+  async function geocodePlace(query) {
+    const url =
+      'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' +
+      encodeURIComponent(query);
+
+    const response = await fetch(url, {
+      headers: {
+        // Nominatim's usage policy asks clients to identify themselves.
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error('Geocoding request failed (' + response.status + ')');
+    }
+
+    const results = await response.json();
+
+    if (!results || results.length === 0) {
+      return null;
+    }
+
+    return {
+      lat: parseFloat(results[0].lat),
+      lon: parseFloat(results[0].lon),
+      displayName: results[0].display_name
+    };
+  }
+
+  async function handleSetLocations() {
+    const pickupText = pickupInput.value.trim();
+    const destinationText = destinationInput.value.trim();
+
+    clearTripError();
+
+    if (!pickupText || !destinationText) {
+      showTripError('Please enter both a pickup location and a destination.');
+      return;
+    }
+
+    geocodeBtn.disabled = true;
+    geocodeBtn.textContent = 'LOCATING...';
+    tripResult.textContent = 'Looking up locations...';
+
+    try {
+      // Nominatim's usage policy asks for requests to be sent one at a time
+      // rather than in parallel, so we geocode pickup then destination in sequence.
+      const pickupResult = await geocodePlace(pickupText);
+      if (!pickupResult) {
+        showTripError('Could not find pickup location: "' + pickupText + '"');
+        tripResult.textContent = 'No locations set yet.';
+        return;
+      }
+
+      const destinationResult = await geocodePlace(destinationText);
+      if (!destinationResult) {
+        showTripError('Could not find destination: "' + destinationText + '"');
+        tripResult.textContent = 'No locations set yet.';
+        return;
+      }
+
+      pickupCoords = { lat: pickupResult.lat, lon: pickupResult.lon };
+      destinationCoords = { lat: destinationResult.lat, lon: destinationResult.lon };
+
+      tripResult.innerHTML =
+        '<strong>Pickup:</strong> ' + pickupCoords.lat.toFixed(6) + ', ' + pickupCoords.lon.toFixed(6) + '<br>' +
+        '<strong>Destination:</strong> ' + destinationCoords.lat.toFixed(6) + ', ' + destinationCoords.lon.toFixed(6) +
+        '<br><span style="color:#5a6070;">Route generation comes in the next stage.</span>';
+    } catch (err) {
+      showTripError('Something went wrong while looking up locations. Please check your internet connection and try again.');
+      tripResult.textContent = 'No locations set yet.';
+    } finally {
+      geocodeBtn.disabled = false;
+      geocodeBtn.textContent = 'SET LOCATIONS';
+    }
+  }
+
+  geocodeBtn.addEventListener('click', handleSetLocations);
 </script>
 
 </body>
