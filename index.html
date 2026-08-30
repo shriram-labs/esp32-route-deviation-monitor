@@ -136,6 +136,7 @@
   .dot-error     { background-color: #f87171; }
   .dot-notstarted{ background-color: #6b7280; }
   .dot-onroute   { background-color: #4ade80; }
+  .dot-reached   { background-color: #60a5fa; }
   .dot-deviated  { background-color: #f87171; }
   .dot-simulated { background-color: #facc15; }
   .dot-connected { background-color: #4ade80; }
@@ -339,7 +340,7 @@
     <button id="stopBtn" disabled>STOP MONITORING</button>
   </div>
 
-  <div class="footer-note">Stage 3C — Live Leaflet map added. Route deviation logic unchanged.</div>
+  <div class="footer-note">Stage 3E — Destination geofence active. ESP32 removed from project scope.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
@@ -494,6 +495,55 @@
   // could later be exposed as a UI control.
   const DEVIATION_THRESHOLD_METERS = 30;
 
+  // ===================================================================
+  // STAGE 3D: Robust deviation detection (debounce + hysteresis)
+  //
+  // Raw GPS readings can jump around by several metres from one update
+  // to the next (multipath reflections, tree cover, tall buildings),
+  // so reacting to a single reading crossing 30 m would cause false
+  // "Deviated" flags that immediately flip back. Two techniques fix this:
+  //
+  // 1. DEBOUNCE (consecutive readings): only declare "Deviated" after
+  //    N consecutive readings are over the threshold, not just one.
+  //    Same for returning to "On Route".
+  //
+  // 2. HYSTERESIS (different thresholds for entering vs exiting):
+  //    it takes MORE distance to be marked Deviated than it takes to
+  //    be marked back On Route. This stops rapid flickering when the
+  //    live distance sits right around the threshold line.
+  // ===================================================================
+
+  const DEVIATION_ENTER_THRESHOLD_METERS = DEVIATION_THRESHOLD_METERS;       // must exceed this to start counting as deviated
+  const DEVIATION_EXIT_THRESHOLD_METERS = 20;                                // must drop below this to count as back on route
+  const CONSECUTIVE_READINGS_REQUIRED = 3;                                   // readings needed before flipping state
+
+  // Tracks the currently confirmed state ('onroute' or 'deviated'),
+  // separate from what a single raw reading suggests.
+  let confirmedRouteState = 'onroute';
+
+  // ===================================================================
+  // STAGE 3E: Destination geofence
+  //
+  // A simple circular geofence around the destination point. When the
+  // live GPS position comes within DESTINATION_GEOFENCE_RADIUS_METERS of
+  // the destination, the trip is marked as "Destination Reached". This
+  // is independent of the route-deviation state above - a trip can be
+  // marked reached even if the last reading was flagged as deviated
+  // (e.g. cutting across a parking lot near the destination).
+  // ===================================================================
+
+  const DESTINATION_GEOFENCE_RADIUS_METERS = 100;
+
+  // Becomes true once the destination geofence has been entered for the
+  // current trip. Kept sticky (doesn't reset if the user later moves back
+  // out of the radius) since the goal was already achieved.
+  let destinationReached = false;
+
+  // Counts how many consecutive readings have suggested a state change
+  // that hasn't been confirmed yet.
+  let consecutiveOverThreshold = 0;
+  let consecutiveUnderThreshold = 0;
+
   // ----- Distance calculation helpers -----
 
   // Haversine distance between two lat/lon points, in metres.
@@ -593,6 +643,48 @@
     routeLabel.textContent = labelText;
   }
 
+  // Decides the CONFIRMED route state ('onroute' or 'deviated') given a
+  // new raw distance reading, using hysteresis + consecutive-reading
+  // debounce so a single noisy GPS spike can't flip the state on its own.
+  //
+  // Returns the confirmed state string, and updates confirmedRouteState
+  // as a side effect once enough consecutive readings agree.
+  function evaluateRouteState(distance) {
+    if (confirmedRouteState === 'onroute') {
+      // Currently On Route: only start counting toward Deviated if this
+      // reading is past the (higher) enter-threshold.
+      if (distance > DEVIATION_ENTER_THRESHOLD_METERS) {
+        consecutiveOverThreshold++;
+        consecutiveUnderThreshold = 0;
+
+        if (consecutiveOverThreshold >= CONSECUTIVE_READINGS_REQUIRED) {
+          confirmedRouteState = 'deviated';
+          consecutiveOverThreshold = 0;
+        }
+      } else {
+        // Reading pulled back under threshold - reset the counter,
+        // this was likely just GPS noise.
+        consecutiveOverThreshold = 0;
+      }
+    } else {
+      // Currently Deviated: only start counting toward On Route if this
+      // reading is under the (lower) exit-threshold.
+      if (distance < DEVIATION_EXIT_THRESHOLD_METERS) {
+        consecutiveUnderThreshold++;
+        consecutiveOverThreshold = 0;
+
+        if (consecutiveUnderThreshold >= CONSECUTIVE_READINGS_REQUIRED) {
+          confirmedRouteState = 'onroute';
+          consecutiveUnderThreshold = 0;
+        }
+      } else {
+        consecutiveUnderThreshold = 0;
+      }
+    }
+
+    return confirmedRouteState;
+  }
+
   function formatTime(date) {
     return date.toLocaleTimeString('en-GB'); // 24-hour format, e.g. 22:14:31
   }
@@ -630,21 +722,64 @@
     // This is purely visual and does not affect the deviation check below.
     updateLiveMarkerOnMap(lat, lon);
 
-    // ----- Route deviation check -----
+    // ----- Route deviation check (Stage 3D: debounced + hysteresis) -----
     const distance = distanceToRoute(lat, lon, routeWaypoints);
 
     if (distance === null) {
       // No route defined - shouldn't normally happen since routeWaypoints is hardcoded above
       setRouteStatus('dot-notstarted', 'Not Started');
       routeSub.textContent = 'Distance from route: -- | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
-    } else if (distance <= DEVIATION_THRESHOLD_METERS) {
-      setRouteStatus('dot-onroute', 'On Route');
-      routeSub.textContent =
-        'Distance from route: ' + distance.toFixed(1) + ' m | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
     } else {
-      setRouteStatus('dot-deviated', 'Deviated');
-      routeSub.textContent =
-        'Distance from route: ' + distance.toFixed(1) + ' m | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
+      const confirmedState = evaluateRouteState(distance);
+
+      // Show how many consecutive readings are pending confirmation,
+      // so it's visible during testing/demo that this isn't reacting
+      // to a single reading.
+      let pendingNote = '';
+      if (confirmedState === 'onroute' && consecutiveOverThreshold > 0) {
+        pendingNote = ' (deviation building: ' + consecutiveOverThreshold + '/' + CONSECUTIVE_READINGS_REQUIRED + ')';
+      } else if (confirmedState === 'deviated' && consecutiveUnderThreshold > 0) {
+        pendingNote = ' (returning: ' + consecutiveUnderThreshold + '/' + CONSECUTIVE_READINGS_REQUIRED + ')';
+      }
+
+      if (confirmedState === 'onroute') {
+        setRouteStatus('dot-onroute', 'On Route');
+      } else {
+        setRouteStatus('dot-deviated', 'Deviated');
+      }
+
+      routeSub.innerHTML =
+        'Distance from route: ' + distance.toFixed(1) + ' m &nbsp; | &nbsp; GPS accuracy: ±' + accuracy.toFixed(1) + ' m<br>' +
+        'Enter threshold: ' + DEVIATION_ENTER_THRESHOLD_METERS + ' m &nbsp; Exit threshold: ' + DEVIATION_EXIT_THRESHOLD_METERS + ' m' +
+        '<span style="color:#5a6070;">' + pendingNote + '</span>';
+    }
+
+    // ----- Stage 3E: Destination geofence check -----
+    // This runs independently of the route-deviation logic above and can
+    // override the displayed status once the destination is reached.
+    if (destinationCoords !== null) {
+      const distanceToDestination = haversineDistance(
+        lat, lon, destinationCoords.lat, destinationCoords.lon
+      );
+
+      if (!destinationReached && distanceToDestination <= DESTINATION_GEOFENCE_RADIUS_METERS) {
+        destinationReached = true;
+      }
+
+      if (destinationReached) {
+        // Destination reached takes priority in the status display,
+        // regardless of the current route-deviation state.
+        setRouteStatus('dot-reached', 'Destination Reached');
+        routeSub.innerHTML =
+          'Arrived within ' + DESTINATION_GEOFENCE_RADIUS_METERS + ' m of destination.<br>' +
+          '<span style="color:#5a6070;">Distance to destination: ' + distanceToDestination.toFixed(1) + ' m</span>';
+      } else if (distance !== null) {
+        // Not yet reached - show distance-to-destination as an extra
+        // line under the existing deviation info, without replacing it.
+        routeSub.innerHTML +=
+          '<br><span style="color:#5a6070;">Distance to destination: ' + distanceToDestination.toFixed(1) + ' m (arrival within ' +
+          DESTINATION_GEOFENCE_RADIUS_METERS + ' m)</span>';
+      }
     }
   }
 
@@ -682,6 +817,14 @@
     setRouteStatus('dot-notstarted', 'Not Started');
     routeSub.textContent = 'Distance from route: -- | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
 
+    // Stage 3D: reset debounce/hysteresis state for a fresh monitoring session
+    confirmedRouteState = 'onroute';
+    consecutiveOverThreshold = 0;
+    consecutiveUnderThreshold = 0;
+
+    // Stage 3E: a fresh trip means the destination hasn't been reached yet
+    destinationReached = false;
+
     const options = {
       enableHighAccuracy: true,
       maximumAge: 0,
@@ -705,6 +848,11 @@
     setRouteStatus('dot-notstarted', 'Not Started');
     routeSub.textContent = 'Distance from route: -- | Threshold: ' + DEVIATION_THRESHOLD_METERS + ' m';
     clearError();
+
+    // Stage 3D: reset debounce/hysteresis state so a new session starts clean
+    confirmedRouteState = 'onroute';
+    consecutiveOverThreshold = 0;
+    consecutiveUnderThreshold = 0;
 
     // Stage 3C: remove the live position marker but keep the route line visible.
     removeLiveMarkerFromMap();
