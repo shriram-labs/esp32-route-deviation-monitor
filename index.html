@@ -352,7 +352,7 @@
     <div class="status-sub" id="firebaseSub">Initializing Firebase Realtime Database connection.</div>
   </div>
 
-  <div class="footer-note">Stage 4A — Firebase Realtime Database connection test.</div>
+  <div class="footer-note">Stage 4B — Live GPS upload to Firebase (testTrip, every 5s). Local monitoring unaffected if cloud sync fails.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
@@ -420,8 +420,41 @@
       setFirebaseStatus('dot-error', 'Connection Failed', 'Could not write/read test data: ' + err.message);
     });
 
+    // ===================================================================
+    // STAGE 4B: Live GPS upload to Firebase.
+    //
+    // The main (non-module) script below can't use ES module imports
+    // directly, so we expose a single global function here that it can
+    // call. This function is defensive: any failure here is caught and
+    // reported, but never thrown back to the caller, so a Firebase
+    // problem can NEVER interrupt GPS tracking, deviation detection,
+    // or the map - those must keep working even if the cloud write fails.
+    //
+    // Writes to a fixed 'testTrip' path for now (Stage 4B). Trip ID/PIN
+    // and a real 'trips/RANDOM_ID' path structure come in Stage 4D.
+    // ===================================================================
+    window.uploadTripDataToFirebase = function (tripData) {
+      try {
+        const tripRef = ref(database, 'testTrip');
+        set(tripRef, tripData).catch(function (err) {
+          // Silent-ish failure: just log it, don't disrupt the UI or
+          // local monitoring. The Cloud Sync Status card already shows
+          // the last known connection state from the 4A test above.
+          console.warn('Firebase trip data upload failed:', err.message);
+        });
+      } catch (err) {
+        console.warn('Firebase trip data upload error:', err.message);
+      }
+    };
+
   } catch (err) {
     setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
+
+    // Stage 4B: if Firebase never initialized, uploads must be a harmless
+    // no-op rather than a missing-function error in the main script.
+    window.uploadTripDataToFirebase = function () {
+      // Firebase unavailable - intentionally does nothing.
+    };
   }
 </script>
 
@@ -454,6 +487,12 @@
   // ----- State -----
   let watchId = null;
   let updateCount = 0;
+
+  // ----- Stage 4B: Firebase upload throttling -----
+  // GPS can update faster than this, but we only write to Firebase
+  // at most once every 5 seconds to avoid unnecessary database writes.
+  const FIREBASE_UPLOAD_INTERVAL_MS = 5000;
+  let lastFirebaseUploadTime = 0;
 
   // ===================================================================
   // STAGE 3C: Live Leaflet map
@@ -787,6 +826,13 @@
 
     updateCount++;
 
+    // Stage 4B: values captured here (without changing any existing
+    // display logic below) so they can be uploaded to Firebase at the
+    // end of this function.
+    let uploadRouteStatus = 'Not Started';
+    let uploadDistanceFromRoute = null;
+    let uploadDestinationDistance = null;
+
     // Update the GPS card: accuracy line also carries lat/lon/updates/timestamp
     // so we don't need to change the existing card layout from Stage 1.
     gpsSub.innerHTML =
@@ -827,6 +873,10 @@
         setRouteStatus('dot-deviated', 'Deviated');
       }
 
+      // Stage 4B: capture for upload (purely additive, doesn't affect display above)
+      uploadRouteStatus = (confirmedState === 'onroute') ? 'On Route' : 'Deviated';
+      uploadDistanceFromRoute = distance;
+
       routeSub.innerHTML =
         'Distance from route: ' + distance.toFixed(1) + ' m &nbsp; | &nbsp; GPS accuracy: ±' + accuracy.toFixed(1) + ' m<br>' +
         'Enter threshold: ' + DEVIATION_ENTER_THRESHOLD_METERS + ' m &nbsp; Exit threshold: ' + DEVIATION_EXIT_THRESHOLD_METERS + ' m' +
@@ -852,12 +902,50 @@
         routeSub.innerHTML =
           'Arrived within ' + DESTINATION_GEOFENCE_RADIUS_METERS + ' m of destination.<br>' +
           '<span style="color:#5a6070;">Distance to destination: ' + distanceToDestination.toFixed(1) + ' m</span>';
+
+        // Stage 4B: capture for upload
+        uploadRouteStatus = 'Destination Reached';
       } else if (distance !== null) {
         // Not yet reached - show distance-to-destination as an extra
         // line under the existing deviation info, without replacing it.
         routeSub.innerHTML +=
           '<br><span style="color:#5a6070;">Distance to destination: ' + distanceToDestination.toFixed(1) + ' m (arrival within ' +
           DESTINATION_GEOFENCE_RADIUS_METERS + ' m)</span>';
+      }
+
+      // Stage 4B: capture destination distance for upload regardless of reached state
+      uploadDestinationDistance = distanceToDestination;
+    }
+
+    // ===================================================================
+    // STAGE 4B: throttled Firebase upload (at most once every 5 seconds).
+    // This is purely additive - it reads values already computed above
+    // and never affects local GPS/route/map behavior. If the upload
+    // function isn't available (Firebase failed to initialize) or the
+    // write itself fails, this must not interrupt monitoring in any way.
+    // ===================================================================
+    const now = Date.now();
+    if (now - lastFirebaseUploadTime >= FIREBASE_UPLOAD_INTERVAL_MS) {
+      lastFirebaseUploadTime = now;
+
+      if (typeof window.uploadTripDataToFirebase === 'function') {
+        const tripPayload = {
+          location: {
+            latitude: lat,
+            longitude: lon,
+            accuracy: accuracy,
+            timestamp: now
+          },
+          route: {
+            status: uploadRouteStatus,
+            distanceFromRoute: uploadDistanceFromRoute,
+            deviationThreshold: DEVIATION_THRESHOLD_METERS,
+            destinationDistance: uploadDestinationDistance
+          },
+          lastUpdate: now
+        };
+
+        window.uploadTripDataToFirebase(tripPayload);
       }
     }
   }
@@ -903,6 +991,10 @@
 
     // Stage 3E: a fresh trip means the destination hasn't been reached yet
     destinationReached = false;
+
+    // Stage 4B: reset upload throttle so the first reading of a new
+    // session uploads promptly rather than waiting out an old timer
+    lastFirebaseUploadTime = 0;
 
     const options = {
       enableHighAccuracy: true,
