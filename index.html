@@ -372,7 +372,8 @@
     getDatabase,
     ref,
     set,
-    get
+    get,
+    update
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
 
   const firebaseConfig = {
@@ -436,7 +437,10 @@
     window.uploadTripDataToFirebase = function (tripData) {
       try {
         const tripRef = ref(database, 'testTrip');
-        set(tripRef, tripData).catch(function (err) {
+        // update() merges only the given children (location, route,
+        // lastUpdate) and leaves any other child - like routeMeta,
+        // written separately below - untouched.
+        update(tripRef, tripData).catch(function (err) {
           // Silent-ish failure: just log it, don't disrupt the UI or
           // local monitoring. The Cloud Sync Status card already shows
           // the last known connection state from the 4A test above.
@@ -447,12 +451,32 @@
       }
     };
 
+    // ===================================================================
+    // STAGE 4C support: upload route metadata (pickup, destination, and
+    // the OSRM route polyline) ONCE whenever a new route is generated -
+    // not on every GPS tick. This lets the observer page draw the same
+    // route without recalculating anything itself.
+    // ===================================================================
+    window.uploadRouteMetaToFirebase = function (routeMeta) {
+      try {
+        const tripRef = ref(database, 'testTrip');
+        update(tripRef, { routeMeta: routeMeta }).catch(function (err) {
+          console.warn('Firebase route metadata upload failed:', err.message);
+        });
+      } catch (err) {
+        console.warn('Firebase route metadata upload error:', err.message);
+      }
+    };
+
   } catch (err) {
     setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
 
     // Stage 4B: if Firebase never initialized, uploads must be a harmless
     // no-op rather than a missing-function error in the main script.
     window.uploadTripDataToFirebase = function () {
+      // Firebase unavailable - intentionally does nothing.
+    };
+    window.uploadRouteMetaToFirebase = function () {
       // Firebase unavailable - intentionally does nothing.
     };
   }
@@ -1200,6 +1224,18 @@
 
       // Stage 3C: draw the route, pickup, and destination on the live map.
       drawRouteOnMap(pickup, destination, routeWaypoints);
+
+      // Stage 4C support: upload route metadata to Firebase once, so the
+      // observer page can draw the same pickup/destination/route without
+      // needing its own OSRM call. This is a one-time write per route
+      // generation, not part of the throttled 5-second location upload.
+      if (typeof window.uploadRouteMetaToFirebase === 'function') {
+        window.uploadRouteMetaToFirebase({
+          pickup: pickup,
+          destination: destination,
+          waypoints: routeWaypoints
+        });
+      }
 
     } catch (err) {
       routeFetchResult.innerHTML =
