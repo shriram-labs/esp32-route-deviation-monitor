@@ -1,1 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observer Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  /* Styling intentionally mirrors route_monitor.html for a consistent look */
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #0f1115;
+    color: #eaeaea;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 16px;
+  }
+
+  .app {
+    width: 100%;
+    max-width: 460px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .header {
+    text-align: center;
+    padding: 18px 10px 4px;
+  }
+
+  .header h1 {
+    font-size: 19px;
+    letter-spacing: 0.5px;
+    color: #ffffff;
+  }
+
+  .header p {
+    font-size: 12.5px;
+    color: #9aa0aa;
+    margin-top: 4px;
+  }
+
+  .card {
+    background-color: #1a1d24;
+    border: 1px solid #23262e;
+    border-radius: 12px;
+    padding: 16px;
+  }
+
+  .card-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #9aa0aa;
+    margin-bottom: 10px;
+  }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .status-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .dot-waiting   { background-color: #6b7280; }
+  .dot-active    { background-color: #4ade80; }
+  .dot-error     { background-color: #f87171; }
+  .dot-notstarted{ background-color: #6b7280; }
+  .dot-onroute   { background-color: #4ade80; }
+  .dot-deviated  { background-color: #f87171; }
+  .dot-reached   { background-color: #60a5fa; }
+
+  .status-label {
+    font-size: 14.5px;
+    font-weight: 600;
+  }
+
+  .status-sub {
+    font-size: 12px;
+    color: #9aa0aa;
+    margin-top: 6px;
+    line-height: 1.6;
+  }
+
+  .footer-note {
+    text-align: center;
+    font-size: 11px;
+    color: #4b5060;
+    padding: 6px 0 4px;
+  }
+
+  #mapContainer {
+    height: 260px;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .map-empty-message {
+    height: 260px;
+    border-radius: 10px;
+    background:
+      repeating-linear-gradient(
+        45deg,
+        #1e222a,
+        #1e222a 10px,
+        #191c23 10px,
+        #191c23 20px
+      );
+    border: 1px dashed #33384280;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: #6b7280;
+    text-align: center;
+    padding: 12px;
+  }
+
+  .map-empty-message .pin {
+    font-size: 26px;
+  }
+
+  .map-empty-message .label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #9aa0aa;
+  }
+
+  .map-empty-message .sublabel {
+    font-size: 11px;
+    color: #5a6070;
+  }
+
+  .error-message {
+    margin-top: 12px;
+    padding: 10px;
+    background-color: #3a1919;
+    color: #f87171;
+    border-radius: 8px;
+    font-size: 13px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <div class="header">
+    <h1>OBSERVER DASHBOARD</h1>
+    <p>Live Trip Monitoring (Read-Only)</p>
+  </div>
+
+  <!-- ===== Cloud Sync Status ===== -->
+  <div class="card">
+    <div class="card-title">Cloud Sync Status</div>
+    <div class="status-row">
+      <div class="status-left">
+        <span class="dot dot-waiting" id="firebaseDot"></span>
+        <span class="status-label" id="firebaseLabel">Connecting...</span>
+      </div>
+    </div>
+    <div class="status-sub" id="firebaseSub">Initializing Firebase Realtime Database connection.</div>
+  </div>
+
+  <!-- ===== Live Map ===== -->
+  <div class="card">
+    <div class="card-title">Traveler Position</div>
+    <div id="mapContainer" style="display:none;"></div>
+    <div class="map-empty-message" id="mapEmptyMessage">
+      <div class="pin">📍</div>
+      <div class="label">Waiting for trip data</div>
+      <div class="sublabel">Map appears once route/location data arrives from the traveler.</div>
+    </div>
+  </div>
+
+  <!-- ===== GPS Status ===== -->
+  <div class="card">
+    <div class="card-title">Traveler GPS</div>
+    <div class="status-row">
+      <div class="status-left">
+        <span class="dot dot-waiting" id="gpsDot"></span>
+        <span class="status-label" id="gpsLabel">No data yet</span>
+      </div>
+    </div>
+    <div class="status-sub" id="gpsSub">Latitude: -- &nbsp; Longitude: -- &nbsp; Accuracy: --</div>
+  </div>
+
+  <!-- ===== Route Status ===== -->
+  <div class="card">
+    <div class="card-title">Route Status</div>
+    <div class="status-row">
+      <div class="status-left">
+        <span class="dot dot-notstarted" id="routeDot"></span>
+        <span class="status-label" id="routeLabel">Not Started</span>
+      </div>
+    </div>
+    <div class="status-sub" id="routeSub">Distance from route: -- &nbsp; | &nbsp; Distance to destination: --</div>
+  </div>
+
+  <!-- ===== Last Update ===== -->
+  <div class="card">
+    <div class="card-title">Last Update</div>
+    <div class="status-sub" id="lastUpdateText" style="margin-top:0;">No updates received yet.</div>
+  </div>
+
+  <div class="error-message" id="errorBox"></div>
+
+  <div class="footer-note">Stage 4C — Observer reads testTrip from Firebase. Read-only; no route/deviation logic runs here.</div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- ===================================================================
+     STAGE 4C: Observer dashboard.
+     This page is READ-ONLY. It does not calculate deviation, geofencing,
+     or routing itself - it simply listens to the same 'testTrip' path
+     that route_monitor.html (the traveler app) writes to, and displays
+     whatever it finds there. All "intelligence" stays on the traveler's
+     device, per the locked architecture decision.
+     ==================================================================== -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
+  import {
+    getDatabase,
+    ref,
+    onValue
+  } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+
+  // Same Firebase project as route_monitor.html - both files must point
+  // at the same project so the observer reads what the traveler writes.
+  const firebaseConfig = {
+    apiKey: "AIzaSyCjsfXED3CN07XjWXAhUNSzMm4TpGU9c1U",
+    authDomain: "intelligent-route-monitor.firebaseapp.com",
+    databaseURL: "https://intelligent-route-monitor-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "intelligent-route-monitor",
+    storageBucket: "intelligent-route-monitor.firebasestorage.app",
+    messagingSenderId: "632421143625",
+    appId: "1:632421143625:web:b087287644e62ebdc55b98",
+    measurementId: "G-7B978MHT79"
+  };
+
+  // ----- Element references -----
+  const firebaseDot = document.getElementById('firebaseDot');
+  const firebaseLabel = document.getElementById('firebaseLabel');
+  const firebaseSub = document.getElementById('firebaseSub');
+
+  const mapContainer = document.getElementById('mapContainer');
+  const mapEmptyMessage = document.getElementById('mapEmptyMessage');
+
+  const gpsDot = document.getElementById('gpsDot');
+  const gpsLabel = document.getElementById('gpsLabel');
+  const gpsSub = document.getElementById('gpsSub');
+
+  const routeDot = document.getElementById('routeDot');
+  const routeLabel = document.getElementById('routeLabel');
+  const routeSub = document.getElementById('routeSub');
+
+  const lastUpdateText = document.getElementById('lastUpdateText');
+  const errorBox = document.getElementById('errorBox');
+
+  function setFirebaseStatus(dotClass, labelText, subText) {
+    firebaseDot.className = 'dot ' + dotClass;
+    firebaseLabel.textContent = labelText;
+    firebaseSub.textContent = subText;
+  }
+
+  function showError(message) {
+    errorBox.style.display = 'block';
+    errorBox.textContent = message;
+  }
+
+  // ----- Map state -----
+  let map = null;
+  let routePolyline = null;
+  let pickupMarker = null;
+  let destinationMarker = null;
+  let liveMarker = null;
+
+  // Tracks whether route metadata (pickup/destination/waypoints) has
+  // already been drawn, so we don't redraw it on every location update -
+  // only when the routeMeta itself actually changes.
+  let lastDrawnRouteMetaJSON = null;
+
+  function ensureMapInitialized() {
+    if (map !== null) {
+      return;
+    }
+
+    mapEmptyMessage.style.display = 'none';
+    mapContainer.style.display = 'block';
+
+    map = L.map('mapContainer', {
+      zoomControl: true,
+      attributionControl: true
+    }).setView([17.9784, 79.5941], 10);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    setTimeout(function () {
+      map.invalidateSize();
+    }, 200);
+  }
+
+  function drawRouteMeta(routeMeta) {
+    if (!routeMeta || !routeMeta.pickup || !routeMeta.destination || !routeMeta.waypoints) {
+      return;
+    }
+
+    ensureMapInitialized();
+
+    if (pickupMarker) map.removeLayer(pickupMarker);
+    if (destinationMarker) map.removeLayer(destinationMarker);
+    if (routePolyline) map.removeLayer(routePolyline);
+
+    pickupMarker = L.marker([routeMeta.pickup.lat, routeMeta.pickup.lon]).addTo(map).bindPopup('Pickup');
+    destinationMarker = L.marker([routeMeta.destination.lat, routeMeta.destination.lon]).addTo(map).bindPopup('Destination');
+
+    const latLngs = routeMeta.waypoints.map(function (point) {
+      return [point.lat, point.lon];
+    });
+
+    routePolyline = L.polyline(latLngs, { color: '#2563eb', weight: 4 }).addTo(map);
+    map.fitBounds(routePolyline.getBounds(), { padding: [24, 24] });
+  }
+
+  function updateLiveMarker(lat, lon) {
+    ensureMapInitialized();
+
+    if (liveMarker === null) {
+      liveMarker = L.circleMarker([lat, lon], {
+        radius: 8,
+        color: '#ffffff',
+        weight: 2,
+        fillColor: '#4ade80',
+        fillOpacity: 1
+      }).addTo(map).bindPopup('Traveler');
+    } else {
+      liveMarker.setLatLng([lat, lon]);
+    }
+  }
+
+  function formatTime(date) {
+    return date.toLocaleTimeString('en-GB');
+  }
+
+  function routeStatusToDotClass(status) {
+    if (status === 'On Route') return 'dot-onroute';
+    if (status === 'Deviated') return 'dot-deviated';
+    if (status === 'Destination Reached') return 'dot-reached';
+    return 'dot-notstarted';
+  }
+
+  try {
+    const app = initializeApp(firebaseConfig);
+    const database = getDatabase(app);
+    const tripRef = ref(database, 'testTrip');
+
+    setFirebaseStatus('dot-waiting', 'Waiting for data...', 'Connected to Firebase, listening for trip updates.');
+
+    // onValue fires immediately with current data, then again every time
+    // the data changes - this is what makes the dashboard "live" without
+    // needing to poll or refresh the page.
+    onValue(tripRef, function (snapshot) {
+      const data = snapshot.val();
+
+      if (!data) {
+        setFirebaseStatus('dot-waiting', 'No trip data yet', 'Waiting for the traveler to start monitoring.');
+        return;
+      }
+
+      setFirebaseStatus('dot-active', 'Connected', 'Receiving live trip updates.');
+
+      // ----- Route metadata (pickup/destination/route line) -----
+      if (data.routeMeta) {
+        const routeMetaJSON = JSON.stringify(data.routeMeta);
+        if (routeMetaJSON !== lastDrawnRouteMetaJSON) {
+          drawRouteMeta(data.routeMeta);
+          lastDrawnRouteMetaJSON = routeMetaJSON;
+        }
+      }
+
+      // ----- Live location -----
+      if (data.location) {
+        const lat = data.location.latitude;
+        const lon = data.location.longitude;
+        const accuracy = data.location.accuracy;
+
+        gpsDot.className = 'dot dot-active';
+        gpsLabel.textContent = 'Active';
+        gpsSub.innerHTML =
+          'Latitude: ' + lat.toFixed(6) + ' &nbsp; Longitude: ' + lon.toFixed(6) + '<br>' +
+          'Accuracy: ±' + accuracy.toFixed(1) + ' m';
+
+        updateLiveMarker(lat, lon);
+      }
+
+      // ----- Route status -----
+      if (data.route) {
+        routeDot.className = 'dot ' + routeStatusToDotClass(data.route.status);
+        routeLabel.textContent = data.route.status || 'Unknown';
+
+        const distanceFromRouteText =
+          (data.route.distanceFromRoute !== null && data.route.distanceFromRoute !== undefined)
+            ? data.route.distanceFromRoute.toFixed(1) + ' m'
+            : '--';
+
+        const destinationDistanceText =
+          (data.route.destinationDistance !== null && data.route.destinationDistance !== undefined)
+            ? data.route.destinationDistance.toFixed(1) + ' m'
+            : '--';
+
+        routeSub.innerHTML =
+          'Distance from route: ' + distanceFromRouteText + '<br>' +
+          'Distance to destination: ' + destinationDistanceText;
+      }
+
+      // ----- Last update timestamp -----
+      if (data.lastUpdate) {
+        const updateDate = new Date(data.lastUpdate);
+        lastUpdateText.textContent = 'Last update: ' + formatTime(updateDate);
+      }
+    }, function (err) {
+      setFirebaseStatus('dot-error', 'Connection Error', 'Could not read trip data: ' + err.message);
+      showError('Failed to read live trip data from Firebase.');
+    });
+
+  } catch (err) {
+    setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
+    showError('Firebase failed to initialize: ' + err.message);
+  }
+</script>
+
+</body>
+</html>
