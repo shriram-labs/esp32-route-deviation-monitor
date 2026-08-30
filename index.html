@@ -340,12 +340,91 @@
     <button id="stopBtn" disabled>STOP MONITORING</button>
   </div>
 
-  <div class="footer-note">Stage 3E — Destination geofence active. ESP32 removed from project scope.</div>
+  <!-- ===== Firebase Status Card (Stage 4A) ===== -->
+  <div class="card">
+    <div class="card-title">Cloud Sync Status</div>
+    <div class="status-row">
+      <div class="status-left">
+        <span class="dot dot-waiting" id="firebaseDot"></span>
+        <span class="status-label" id="firebaseLabel">Connecting...</span>
+      </div>
+    </div>
+    <div class="status-sub" id="firebaseSub">Initializing Firebase Realtime Database connection.</div>
+  </div>
+
+  <div class="footer-note">Stage 4A — Firebase Realtime Database connection test.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- ===================================================================
+     STAGE 4A: Firebase Realtime Database connection test.
+     This module ONLY initializes Firebase and writes a small heartbeat
+     value to confirm the connection works. It does NOT yet upload real
+     GPS/trip data (that's Stage 4B) and does NOT touch any existing
+     GPS/route/map logic below.
+     ==================================================================== -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
+  import {
+    getDatabase,
+    ref,
+    set,
+    get
+  } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCjsfXED3CN07XjWXAhUNSzMm4TpGU9c1U",
+    authDomain: "intelligent-route-monitor.firebaseapp.com",
+    databaseURL: "https://intelligent-route-monitor-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "intelligent-route-monitor",
+    storageBucket: "intelligent-route-monitor.firebasestorage.app",
+    messagingSenderId: "632421143625",
+    appId: "1:632421143625:web:b087287644e62ebdc55b98",
+    measurementId: "G-7B978MHT79"
+  };
+
+  const firebaseDot = document.getElementById('firebaseDot');
+  const firebaseLabel = document.getElementById('firebaseLabel');
+  const firebaseSub = document.getElementById('firebaseSub');
+
+  function setFirebaseStatus(dotClass, labelText, subText) {
+    firebaseDot.className = 'dot ' + dotClass;
+    firebaseLabel.textContent = labelText;
+    firebaseSub.textContent = subText;
+  }
+
+  try {
+    const app = initializeApp(firebaseConfig);
+    const database = getDatabase(app);
+
+    // Write a small heartbeat value to a test path, then read it back,
+    // to confirm both write and read access work with current database
+    // rules (test mode). This does NOT touch any trip/GPS data path -
+    // it's purely a connection check for Stage 4A.
+    const testRef = ref(database, 'connectionTest/heartbeat');
+
+    set(testRef, {
+      connectedAt: new Date().toISOString()
+    }).then(function () {
+      return get(testRef);
+    }).then(function (snapshot) {
+      if (snapshot.exists()) {
+        setFirebaseStatus('dot-active', 'Connected', 'Realtime Database write/read test succeeded.');
+      } else {
+        setFirebaseStatus('dot-error', 'Connection Issue', 'Write succeeded but read-back returned no data. Check database rules.');
+      }
+    }).catch(function (err) {
+      setFirebaseStatus('dot-error', 'Connection Failed', 'Could not write/read test data: ' + err.message);
+    });
+
+  } catch (err) {
+    setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
+  }
+</script>
+
 <script>
   /*
     STAGE 2 NOTE:
