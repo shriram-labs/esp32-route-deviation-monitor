@@ -264,13 +264,20 @@
     <p>GPS-Based Intelligent Monitoring System</p>
   </div>
 
-  <!-- ===== Trip Details Card (Stage 3A - pickup/destination + geocoding) ===== -->
+  <!-- ===== Trip Details Card (pickup auto-detected, destination geocoded) ===== -->
   <div class="card">
     <div class="card-title">Trip Details</div>
 
     <div class="field-group">
-      <label for="pickupInput">Pickup Location</label>
-      <input type="text" id="pickupInput" placeholder="e.g. Khammam Bus Stand">
+      <label>Your Location (Pickup)</label>
+      <div class="status-row" style="padding:11px 12px; background-color:#12141a; border:1px solid #2a2d35; border-radius:8px;">
+        <div class="status-left">
+          <span class="dot dot-waiting" id="locationDetectDot"></span>
+          <span class="status-label" id="locationDetectLabel" style="font-size:14px;">Detecting your location...</span>
+        </div>
+        <button id="retryLocationBtn" style="flex:none; width:auto; padding:6px 10px; font-size:11px; background-color:#2a2d35; color:#9aa0aa;">RETRY</button>
+      </div>
+      <div class="status-sub" id="locationDetectSub" style="margin-top:6px;">Waiting for a GPS fix...</div>
     </div>
 
     <div class="field-group">
@@ -278,9 +285,9 @@
       <input type="text" id="destinationInput" placeholder="e.g. Khammam Railway Station">
     </div>
 
-    <button id="geocodeBtn">SET LOCATIONS</button>
+    <button id="geocodeBtn" disabled>SET DESTINATION</button>
 
-    <div class="trip-result" id="tripResult">No locations set yet.</div>
+    <div class="trip-result" id="tripResult">No trip set up yet.</div>
     <div class="trip-error" id="tripError"></div>
     <div class="trip-result" id="routeFetchResult"></div>
   </div>
@@ -352,7 +359,7 @@
     <div class="status-sub" id="firebaseSub">Initializing Firebase Realtime Database connection.</div>
   </div>
 
-  <div class="footer-note">Stage 4D — Trip ID + PIN access control active. ESP32 fully removed from architecture.</div>
+  <div class="footer-note">Current-location pickup + traveled-path tracking active. Trip ID/PIN access control in place.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
@@ -373,7 +380,8 @@
     ref,
     set,
     get,
-    update
+    update,
+    push
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
 
   const firebaseConfig = {
@@ -478,6 +486,28 @@
       }
     };
 
+    // ===================================================================
+    // TRAVEL PATH: append one point to the traveled-path list in Firebase.
+    // Uses push() rather than set()/update() so each point becomes a new
+    // child with its own chronologically-sortable key, instead of
+    // overwriting a growing array on every write (which would get more
+    // expensive as the trip gets longer). Called at the same ~5-second
+    // throttle as the main location upload, not on every raw GPS tick.
+    // ===================================================================
+    window.uploadTravelPathPointToFirebase = function (tripId, pin, point) {
+      if (!tripId || !pin) {
+        return;
+      }
+      try {
+        const pathRef = ref(database, 'trips/' + tripId + '/' + pin + '/travelPathPoints');
+        push(pathRef, point).catch(function (err) {
+          console.warn('Firebase travel path point upload failed:', err.message);
+        });
+      } catch (err) {
+        console.warn('Firebase travel path point upload error:', err.message);
+      }
+    };
+
   } catch (err) {
     setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
 
@@ -487,6 +517,9 @@
       // Firebase unavailable - intentionally does nothing.
     };
     window.uploadRouteMetaToFirebase = function () {
+      // Firebase unavailable - intentionally does nothing.
+    };
+    window.uploadTravelPathPointToFirebase = function () {
       // Firebase unavailable - intentionally does nothing.
     };
   }
@@ -570,6 +603,17 @@
   let destinationMarker = null;
   let liveMarker = null;
 
+  // ----- Travel path tracking -----
+  // Records every ACCEPTED raw GPS reading (no artificial smoothing or
+  // interpolation between points) so the actual path traveled can be
+  // drawn separately from the planned OSRM route. Readings with poor
+  // accuracy are excluded from this path so the drawn line isn't wildly
+  // distorted by a single bad GPS fix, but nothing is invented between
+  // real readings.
+  let travelPath = [];
+  let travelPathPolyline = null;
+  const TRAVEL_PATH_MAX_ACCEPTABLE_ACCURACY_METERS = 50;
+
   // Lazily creates the Leaflet map the first time it's actually needed,
   // since the container is hidden (display:none) until a route exists.
   function ensureMapInitialized() {
@@ -622,6 +666,44 @@
     routePolyline = L.polyline(latLngs, { color: '#2563eb', weight: 4 }).addTo(map);
 
     map.fitBounds(routePolyline.getBounds(), { padding: [24, 24] });
+  }
+
+  // Adds a valid GPS reading to the traveled-path polyline (red), kept
+  // visually distinct from the planned OSRM route (blue). Called from
+  // handleSuccess() below for every accepted reading - not throttled,
+  // since drawing an extra point locally costs nothing.
+  function addPointToTravelPath(lat, lon, accuracy) {
+    if (accuracy > TRAVEL_PATH_MAX_ACCEPTABLE_ACCURACY_METERS) {
+      // Reading too poor to trust for the visual path - skip it.
+      // (It may still be used elsewhere, e.g. shown in the GPS card.)
+      return;
+    }
+
+    ensureMapInitialized();
+    travelPath.push([lat, lon]);
+
+    if (travelPathPolyline === null) {
+      travelPathPolyline = L.polyline(travelPath, { color: '#f87171', weight: 3, dashArray: '4 4' }).addTo(map);
+    } else {
+      travelPathPolyline.setLatLngs(travelPath);
+    }
+
+    // Keep the traveler visible on screen without constantly re-zooming:
+    // only pan (not zoom) if the current position has drifted outside
+    // the visible map area.
+    if (!map.getBounds().contains([lat, lon])) {
+      map.panTo([lat, lon]);
+    }
+  }
+
+  // Clears the traveled path when a new trip starts (Stage: called from
+  // startMonitoring()), so a previous trip's path doesn't linger.
+  function resetTravelPath() {
+    travelPath = [];
+    if (travelPathPolyline !== null && map !== null) {
+      map.removeLayer(travelPathPolyline);
+      travelPathPolyline = null;
+    }
   }
 
   // Updates (or creates) the live GPS marker on the map. Called from
@@ -906,6 +988,10 @@
     // This is purely visual and does not affect the deviation check below.
     updateLiveMarkerOnMap(lat, lon);
 
+    // Record this reading on the traveled-path polyline (raw points only,
+    // no interpolation), separate from the planned OSRM route.
+    addPointToTravelPath(lat, lon, accuracy);
+
     // ----- Route deviation check (Stage 3D: debounced + hysteresis) -----
     const distance = distanceToRoute(lat, lon, routeWaypoints);
 
@@ -1006,6 +1092,18 @@
 
         window.uploadTripDataToFirebase(currentTripId, currentTripPin, tripPayload);
       }
+
+      // Upload this point to the traveled-path history too, at the same
+      // throttle rate (only if it passed the accuracy check used for the
+      // local map polyline, so Firebase isn't storing noisy points).
+      if (accuracy <= TRAVEL_PATH_MAX_ACCEPTABLE_ACCURACY_METERS &&
+          typeof window.uploadTravelPathPointToFirebase === 'function') {
+        window.uploadTravelPathPointToFirebase(currentTripId, currentTripPin, {
+          lat: lat,
+          lon: lon,
+          timestamp: now
+        });
+      }
     }
   }
 
@@ -1054,6 +1152,9 @@
     // Stage 4B: reset upload throttle so the first reading of a new
     // session uploads promptly rather than waiting out an old timer
     lastFirebaseUploadTime = 0;
+
+    // Clear any previous trip's traveled path from the map
+    resetTravelPath();
 
     // Stage 4D: generate a fresh Trip ID + PIN for this session and
     // display them so the traveler can share them with an observer.
@@ -1123,24 +1224,40 @@
   stopBtn.addEventListener('click', stopMonitoring);
 
   // ===================================================================
-  // STAGE 3A: Pickup / Destination geocoding
-  // This section is intentionally independent of the GPS/deviation logic
-  // above. It only converts place names into lat/lon using the free
-  // OpenStreetMap Nominatim service. It does NOT feed into routeWaypoints
-  // or the deviation algorithm yet - that comes in later stages (3B-3D).
+  // CURRENT-LOCATION PICKUP: auto-detect the traveler's starting point
+  // using the phone's GPS, instead of requiring manual pickup entry.
+  // Destination is still entered as text and geocoded via Nominatim.
+  //
+  // On page load, we gather a few GPS samples over a short window and
+  // keep the one with the best (lowest) accuracy value, rather than
+  // just using the very first reading - phone GPS often takes a couple
+  // of seconds to settle after a cold start.
   // ===================================================================
 
-  const pickupInput = document.getElementById('pickupInput');
+  const locationDetectDot = document.getElementById('locationDetectDot');
+  const locationDetectLabel = document.getElementById('locationDetectLabel');
+  const locationDetectSub = document.getElementById('locationDetectSub');
+  const retryLocationBtn = document.getElementById('retryLocationBtn');
+
   const destinationInput = document.getElementById('destinationInput');
   const geocodeBtn = document.getElementById('geocodeBtn');
   const tripResult = document.getElementById('tripResult');
   const tripError = document.getElementById('tripError');
   const routeFetchResult = document.getElementById('routeFetchResult');
 
-  // Stores the geocoded coordinates so later stages (3B onwards) can use them.
-  // Not used by the deviation algorithm yet.
+  // Stores the detected pickup / geocoded destination coordinates.
   let pickupCoords = null;
   let destinationCoords = null;
+
+  // How long to gather samples before settling on the best one, and what
+  // accuracy counts as "good enough" to stop early rather than waiting
+  // out the full window.
+  const LOCATION_DETECTION_WINDOW_MS = 6000;
+  const LOCATION_DETECTION_GOOD_ACCURACY_METERS = 20;
+
+  let locationDetectionWatchId = null;
+  let locationDetectionSamples = [];
+  let locationDetectionTimeoutHandle = null;
 
   function showTripError(message) {
     tripError.style.display = 'block';
@@ -1151,6 +1268,92 @@
     tripError.style.display = 'none';
     tripError.textContent = '';
   }
+
+  function setLocationDetectStatus(dotClass, labelText, subText) {
+    locationDetectDot.className = 'dot ' + dotClass;
+    locationDetectLabel.textContent = labelText;
+    locationDetectSub.textContent = subText;
+  }
+
+  function startLocationDetection() {
+    if (!navigator.geolocation) {
+      setLocationDetectStatus('dot-error', 'Not supported', 'This browser does not support geolocation.');
+      return;
+    }
+
+    // Reset state for a fresh detection pass (used on page load and on RETRY)
+    pickupCoords = null;
+    locationDetectionSamples = [];
+    geocodeBtn.disabled = true;
+    setLocationDetectStatus('dot-waiting', 'Detecting your location...', 'Waiting for a stable GPS fix (up to 6 seconds)...');
+
+    if (locationDetectionWatchId !== null) {
+      navigator.geolocation.clearWatch(locationDetectionWatchId);
+    }
+    if (locationDetectionTimeoutHandle !== null) {
+      clearTimeout(locationDetectionTimeoutHandle);
+    }
+
+    const options = {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 15000
+    };
+
+    locationDetectionWatchId = navigator.geolocation.watchPosition(function (position) {
+      locationDetectionSamples.push({
+        lat: position.coords.latitude,
+        lon: position.coords.longitude,
+        accuracy: position.coords.accuracy
+      });
+
+      // Stop early if we already got a good enough fix - no need to
+      // make the traveler wait out the full window unnecessarily.
+      if (position.coords.accuracy <= LOCATION_DETECTION_GOOD_ACCURACY_METERS) {
+        finalizeLocationDetection();
+      }
+    }, function (err) {
+      // A single failed reading during detection isn't necessarily fatal -
+      // only give up if we end up with zero samples once the window closes.
+      console.warn('Location detection reading failed:', err.message);
+    }, options);
+
+    locationDetectionTimeoutHandle = setTimeout(finalizeLocationDetection, LOCATION_DETECTION_WINDOW_MS);
+  }
+
+  function finalizeLocationDetection() {
+    if (locationDetectionWatchId !== null) {
+      navigator.geolocation.clearWatch(locationDetectionWatchId);
+      locationDetectionWatchId = null;
+    }
+    if (locationDetectionTimeoutHandle !== null) {
+      clearTimeout(locationDetectionTimeoutHandle);
+      locationDetectionTimeoutHandle = null;
+    }
+
+    if (locationDetectionSamples.length === 0) {
+      setLocationDetectStatus('dot-error', 'Location unavailable', 'Could not get a GPS fix. Check location permissions and tap RETRY.');
+      return;
+    }
+
+    // Keep the sample with the lowest (best) accuracy value seen so far.
+    let best = locationDetectionSamples[0];
+    for (let i = 1; i < locationDetectionSamples.length; i++) {
+      if (locationDetectionSamples[i].accuracy < best.accuracy) {
+        best = locationDetectionSamples[i];
+      }
+    }
+
+    pickupCoords = { lat: best.lat, lon: best.lon };
+    setLocationDetectStatus('dot-active', 'Location detected', 'Accuracy: ±' + best.accuracy.toFixed(1) + ' m');
+    geocodeBtn.disabled = false;
+  }
+
+  retryLocationBtn.addEventListener('click', startLocationDetection);
+
+  // Kick off detection as soon as the page loads, so it's usually ready
+  // by the time the traveler has typed a destination.
+  startLocationDetection();
 
   // Calls the free Nominatim search API to turn a place name into
   // { lat, lon }. No API key required. Returns null if not found.
@@ -1184,42 +1387,36 @@
   }
 
   async function handleSetLocations() {
-    const pickupText = pickupInput.value.trim();
     const destinationText = destinationInput.value.trim();
 
     clearTripError();
 
-    if (!pickupText || !destinationText) {
-      showTripError('Please enter both a pickup location and a destination.');
+    if (!pickupCoords) {
+      showTripError('Still detecting your current location. Please wait a moment, or tap RETRY.');
+      return;
+    }
+
+    if (!destinationText) {
+      showTripError('Please enter a destination.');
       return;
     }
 
     geocodeBtn.disabled = true;
     geocodeBtn.textContent = 'LOCATING...';
-    tripResult.textContent = 'Looking up locations...';
+    tripResult.textContent = 'Looking up destination...';
 
     try {
-      // Nominatim's usage policy asks for requests to be sent one at a time
-      // rather than in parallel, so we geocode pickup then destination in sequence.
-      const pickupResult = await geocodePlace(pickupText);
-      if (!pickupResult) {
-        showTripError('Could not find pickup location: "' + pickupText + '"');
-        tripResult.textContent = 'No locations set yet.';
-        return;
-      }
-
       const destinationResult = await geocodePlace(destinationText);
       if (!destinationResult) {
         showTripError('Could not find destination: "' + destinationText + '"');
-        tripResult.textContent = 'No locations set yet.';
+        tripResult.textContent = 'No trip set up yet.';
         return;
       }
 
-      pickupCoords = { lat: pickupResult.lat, lon: pickupResult.lon };
       destinationCoords = { lat: destinationResult.lat, lon: destinationResult.lon };
 
       tripResult.innerHTML =
-        '<strong>Pickup:</strong> ' + pickupCoords.lat.toFixed(6) + ', ' + pickupCoords.lon.toFixed(6) + '<br>' +
+        '<strong>Pickup (your location):</strong> ' + pickupCoords.lat.toFixed(6) + ', ' + pickupCoords.lon.toFixed(6) + '<br>' +
         '<strong>Destination:</strong> ' + destinationCoords.lat.toFixed(6) + ', ' + destinationCoords.lon.toFixed(6);
 
       // ----- Stage 3B: fetch the real road route from OSRM -----
@@ -1227,11 +1424,11 @@
       await fetchRouteFromOSRM(pickupCoords, destinationCoords);
 
     } catch (err) {
-      showTripError('Something went wrong while looking up locations. Please check your internet connection and try again.');
-      tripResult.textContent = 'No locations set yet.';
+      showTripError('Something went wrong while looking up the destination. Please check your internet connection and try again.');
+      tripResult.textContent = 'No trip set up yet.';
     } finally {
       geocodeBtn.disabled = false;
-      geocodeBtn.textContent = 'SET LOCATIONS';
+      geocodeBtn.textContent = 'SET DESTINATION';
     }
   }
 
