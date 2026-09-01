@@ -161,6 +161,58 @@
     font-size: 13px;
     display: none;
   }
+
+  /* ===== Trip Entry form (Stage 4D) ===== */
+  .field-group {
+    margin-bottom: 12px;
+  }
+
+  .field-group label {
+    display: block;
+    font-size: 12px;
+    color: #9aa0aa;
+    margin-bottom: 6px;
+  }
+
+  .field-group input {
+    width: 100%;
+    padding: 11px 12px;
+    background-color: #12141a;
+    border: 1px solid #2a2d35;
+    border-radius: 8px;
+    color: #eaeaea;
+    font-size: 14px;
+  }
+
+  .field-group input:focus {
+    outline: none;
+    border-color: #4b5563;
+  }
+
+  #monitorBtn {
+    width: 100%;
+    background-color: #2563eb;
+    color: #ffffff;
+    padding: 13px;
+    font-size: 14px;
+    font-weight: bold;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+
+  #monitorBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .trip-error {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #f87171;
+    display: none;
+  }
 </style>
 </head>
 <body>
@@ -184,62 +236,89 @@
     <div class="status-sub" id="firebaseSub">Initializing Firebase Realtime Database connection.</div>
   </div>
 
-  <!-- ===== Live Map ===== -->
-  <div class="card">
-    <div class="card-title">Traveler Position</div>
-    <div id="mapContainer" style="display:none;"></div>
-    <div class="map-empty-message" id="mapEmptyMessage">
-      <div class="pin">📍</div>
-      <div class="label">Waiting for trip data</div>
-      <div class="sublabel">Map appears once route/location data arrives from the traveler.</div>
+  <!-- ===== Trip Entry Card (Stage 4D) ===== -->
+  <div class="card" id="tripEntryCard">
+    <div class="card-title">Trip Monitoring</div>
+
+    <div class="field-group">
+      <label for="tripIdInput">Trip ID</label>
+      <input type="text" id="tripIdInput" placeholder="e.g. 8f4c2a91-7d3e-4c...">
     </div>
+
+    <div class="field-group">
+      <label for="tripPinInput">PIN</label>
+      <input type="text" id="tripPinInput" placeholder="6-digit PIN" maxlength="6" inputmode="numeric">
+    </div>
+
+    <button id="monitorBtn">MONITOR TRIP</button>
+
+    <div class="trip-error" id="tripEntryError"></div>
   </div>
 
-  <!-- ===== GPS Status ===== -->
-  <div class="card">
-    <div class="card-title">Traveler GPS</div>
-    <div class="status-row">
-      <div class="status-left">
-        <span class="dot dot-waiting" id="gpsDot"></span>
-        <span class="status-label" id="gpsLabel">No data yet</span>
+  <!-- ===== Dashboard (hidden until a trip is successfully joined) ===== -->
+  <div id="dashboardContainer" style="display:none;">
+
+    <!-- ===== Live Map ===== -->
+    <div class="card">
+      <div class="card-title">Traveler Position</div>
+      <div id="mapContainer" style="display:none;"></div>
+      <div class="map-empty-message" id="mapEmptyMessage">
+        <div class="pin">📍</div>
+        <div class="label">Waiting for trip data</div>
+        <div class="sublabel">Map appears once route/location data arrives from the traveler.</div>
       </div>
     </div>
-    <div class="status-sub" id="gpsSub">Latitude: -- &nbsp; Longitude: -- &nbsp; Accuracy: --</div>
-  </div>
 
-  <!-- ===== Route Status ===== -->
-  <div class="card">
-    <div class="card-title">Route Status</div>
-    <div class="status-row">
-      <div class="status-left">
-        <span class="dot dot-notstarted" id="routeDot"></span>
-        <span class="status-label" id="routeLabel">Not Started</span>
+    <!-- ===== GPS Status ===== -->
+    <div class="card">
+      <div class="card-title">Traveler GPS</div>
+      <div class="status-row">
+        <div class="status-left">
+          <span class="dot dot-waiting" id="gpsDot"></span>
+          <span class="status-label" id="gpsLabel">No data yet</span>
+        </div>
       </div>
+      <div class="status-sub" id="gpsSub">Latitude: -- &nbsp; Longitude: -- &nbsp; Accuracy: --</div>
     </div>
-    <div class="status-sub" id="routeSub">Distance from route: -- &nbsp; | &nbsp; Distance to destination: --</div>
-  </div>
 
-  <!-- ===== Last Update ===== -->
-  <div class="card">
-    <div class="card-title">Last Update</div>
-    <div class="status-sub" id="lastUpdateText" style="margin-top:0;">No updates received yet.</div>
+    <!-- ===== Route Status ===== -->
+    <div class="card">
+      <div class="card-title">Route Status</div>
+      <div class="status-row">
+        <div class="status-left">
+          <span class="dot dot-notstarted" id="routeDot"></span>
+          <span class="status-label" id="routeLabel">Not Started</span>
+        </div>
+      </div>
+      <div class="status-sub" id="routeSub">Distance from route: -- &nbsp; | &nbsp; Distance to destination: --</div>
+    </div>
+
+    <!-- ===== Last Update ===== -->
+    <div class="card">
+      <div class="card-title">Last Update</div>
+      <div class="status-sub" id="lastUpdateText" style="margin-top:0;">No updates received yet.</div>
+    </div>
+
   </div>
 
   <div class="error-message" id="errorBox"></div>
 
-  <div class="footer-note">Stage 4C — Observer reads testTrip from Firebase. Read-only; no route/deviation logic runs here.</div>
+  <div class="footer-note">Enter Trip ID + PIN to monitor a trip. Shows planned route (blue) and actual traveled path (red dashed). Read-only.</div>
 
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
+
 <!-- ===================================================================
-     STAGE 4C: Observer dashboard.
+     STAGE 4D: Observer dashboard with Trip ID + PIN entry.
      This page is READ-ONLY. It does not calculate deviation, geofencing,
-     or routing itself - it simply listens to the same 'testTrip' path
-     that route_monitor.html (the traveler app) writes to, and displays
-     whatever it finds there. All "intelligence" stays on the traveler's
-     device, per the locked architecture decision.
+     or routing itself - it listens to 'trips/<tripId>/<pin>', the same
+     path route_monitor.html (the traveler app) writes to for that
+     specific trip, and displays whatever it finds there. All
+     "intelligence" stays on the traveler's device, per the locked
+     architecture decision. Trip ID + PIN together act as a shared
+     access token - not full authentication - as discussed and agreed.
      ==================================================================== -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
@@ -365,6 +444,43 @@
     }
   }
 
+  // ----- Traveled path (actual GPS history, separate from planned route) -----
+  let travelPathPolyline = null;
+
+  // Draws the traveler's actual path (red dashed line) from the list of
+  // points uploaded by the traveler's phone, keeping it visually distinct
+  // from the planned OSRM route (solid blue line). Redrawn each time new
+  // points arrive from Firebase.
+  function drawTravelPath(travelPathPointsObject) {
+    if (!travelPathPointsObject) {
+      return;
+    }
+
+    ensureMapInitialized();
+
+    // Firebase stores push()-appended points as an object keyed by
+    // auto-generated IDs. Those keys sort chronologically, so converting
+    // to an array via Object.keys() (in insertion order) preserves the
+    // order the traveler actually moved through them.
+    const points = Object.keys(travelPathPointsObject).map(function (key) {
+      return travelPathPointsObject[key];
+    });
+
+    const latLngs = points.map(function (point) {
+      return [point.lat, point.lon];
+    });
+
+    if (latLngs.length === 0) {
+      return;
+    }
+
+    if (travelPathPolyline === null) {
+      travelPathPolyline = L.polyline(latLngs, { color: '#f87171', weight: 3, dashArray: '4 4' }).addTo(map);
+    } else {
+      travelPathPolyline.setLatLngs(latLngs);
+    }
+  }
+
   function formatTime(date) {
     return date.toLocaleTimeString('en-GB');
   }
@@ -376,23 +492,96 @@
     return 'dot-notstarted';
   }
 
+  // ----- Trip entry elements (Stage 4D) -----
+  const tripEntryCard = document.getElementById('tripEntryCard');
+  const tripIdInput = document.getElementById('tripIdInput');
+  const tripPinInput = document.getElementById('tripPinInput');
+  const monitorBtn = document.getElementById('monitorBtn');
+  const tripEntryError = document.getElementById('tripEntryError');
+  const dashboardContainer = document.getElementById('dashboardContainer');
+
+  function showTripEntryError(message) {
+    tripEntryError.style.display = 'block';
+    tripEntryError.textContent = message;
+  }
+
+  function clearTripEntryError() {
+    tripEntryError.style.display = 'none';
+    tripEntryError.textContent = '';
+  }
+
+  // Tracks the currently active Firebase listener (returned by onValue)
+  // so we could detach it if needed (e.g. joining a different trip
+  // without reloading the page).
+  let activeUnsubscribe = null;
+
+  let database = null; // set once Firebase initializes successfully
+
   try {
     const app = initializeApp(firebaseConfig);
-    const database = getDatabase(app);
-    const tripRef = ref(database, 'testTrip');
+    database = getDatabase(app);
+    setFirebaseStatus('dot-active', 'Connected', 'Firebase initialized. Enter a Trip ID and PIN to monitor a trip.');
+  } catch (err) {
+    setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
+    showError('Firebase failed to initialize: ' + err.message);
+  }
 
-    setFirebaseStatus('dot-waiting', 'Waiting for data...', 'Connected to Firebase, listening for trip updates.');
+  // ===================================================================
+  // STAGE 4D: Join a specific trip by Trip ID + PIN.
+  //
+  // Reads from 'trips/<tripId>/<pin>' - the SAME path the traveler
+  // writes to. Both values must be correct to reach real data; getting
+  // either wrong simply means no data exists at that path (Firebase
+  // returns null), not a special "wrong PIN" error. This matches the
+  // traveler side's access-token design: Trip ID + PIN together act as
+  // a shared credential, not a fully authenticated login.
+  // ===================================================================
+  function handleMonitorTrip() {
+    clearTripEntryError();
+
+    const tripId = tripIdInput.value.trim();
+    const pin = tripPinInput.value.trim();
+
+    if (!tripId || !pin) {
+      showTripEntryError('Please enter both a Trip ID and a PIN.');
+      return;
+    }
+
+    if (!/^\d{4,6}$/.test(pin)) {
+      showTripEntryError('PIN should be the 4-6 digit code shown on the traveler\'s device.');
+      return;
+    }
+
+    if (database === null) {
+      showTripEntryError('Firebase is not connected yet. Please wait a moment and try again.');
+      return;
+    }
+
+    monitorBtn.disabled = true;
+    monitorBtn.textContent = 'CONNECTING...';
+
+    const tripRef = ref(database, 'trips/' + tripId + '/' + pin);
 
     // onValue fires immediately with current data, then again every time
     // the data changes - this is what makes the dashboard "live" without
     // needing to poll or refresh the page.
-    onValue(tripRef, function (snapshot) {
+    activeUnsubscribe = onValue(tripRef, function (snapshot) {
       const data = snapshot.val();
 
       if (!data) {
-        setFirebaseStatus('dot-waiting', 'No trip data yet', 'Waiting for the traveler to start monitoring.');
+        // Either the trip hasn't started uploading yet, or the
+        // Trip ID/PIN combination is wrong. We can't distinguish these
+        // cases without extra plumbing, so we show one honest message.
+        showTripEntryError('No trip data found for this Trip ID/PIN yet. Double-check both values, or wait for the traveler to press Start Monitoring.');
         return;
       }
+
+      // Valid data found - show the dashboard and hide the entry form.
+      clearTripEntryError();
+      tripEntryCard.style.display = 'none';
+      dashboardContainer.style.display = 'block';
+      monitorBtn.disabled = false;
+      monitorBtn.textContent = 'MONITOR TRIP';
 
       setFirebaseStatus('dot-active', 'Connected', 'Receiving live trip updates.');
 
@@ -403,6 +592,11 @@
           drawRouteMeta(data.routeMeta);
           lastDrawnRouteMetaJSON = routeMetaJSON;
         }
+      }
+
+      // ----- Traveled path (actual GPS history) -----
+      if (data.travelPathPoints) {
+        drawTravelPath(data.travelPathPoints);
       }
 
       // ----- Live location -----
@@ -446,14 +640,13 @@
         lastUpdateText.textContent = 'Last update: ' + formatTime(updateDate);
       }
     }, function (err) {
-      setFirebaseStatus('dot-error', 'Connection Error', 'Could not read trip data: ' + err.message);
-      showError('Failed to read live trip data from Firebase.');
+      monitorBtn.disabled = false;
+      monitorBtn.textContent = 'MONITOR TRIP';
+      showTripEntryError('Could not read trip data: ' + err.message);
     });
-
-  } catch (err) {
-    setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
-    showError('Firebase failed to initialize: ' + err.message);
   }
+
+  monitorBtn.addEventListener('click', handleMonitorTrip);
 </script>
 
 </body>
