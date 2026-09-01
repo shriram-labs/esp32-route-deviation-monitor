@@ -110,7 +110,7 @@
     color: #5a6070;
   }
 
-  /* ===== Status rows (shared by GPS / Route / ESP32 cards) ===== */
+  /* ===== Status rows (shared by GPS / Route cards) ===== */
   .status-row {
     display: flex;
     align-items: center;
@@ -138,9 +138,6 @@
   .dot-onroute   { background-color: #4ade80; }
   .dot-reached   { background-color: #60a5fa; }
   .dot-deviated  { background-color: #f87171; }
-  .dot-simulated { background-color: #facc15; }
-  .dot-connected { background-color: #4ade80; }
-  .dot-alert     { background-color: #f87171; }
 
   .status-label {
     font-size: 14.5px;
@@ -323,21 +320,24 @@
     <div class="status-sub" id="routeSub">Distance from route: -- &nbsp; | &nbsp; Threshold: 30 m</div>
   </div>
 
-  <!-- ===== ESP32 Status Card ===== -->
-  <div class="card">
-    <div class="card-title">ESP32 Status</div>
-    <div class="status-row">
-      <div class="status-left">
-        <span class="dot dot-simulated" id="espDot"></span>
-        <span class="status-label" id="espLabel">Simulation Mode</span>
-      </div>
-    </div>
-  </div>
-
   <!-- ===== Controls ===== -->
   <div class="buttons">
     <button id="startBtn">START MONITORING</button>
     <button id="stopBtn" disabled>STOP MONITORING</button>
+  </div>
+
+  <!-- ===== Trip Credentials Card (Stage 4D) ===== -->
+  <div class="card" id="tripCredentialsCard" style="display:none;">
+    <div class="card-title">Trip Credentials</div>
+    <div class="status-sub" style="margin-top:0;">
+      Trip ID<br>
+      <strong style="color:#eaeaea; font-size:13px; word-break:break-all;" id="tripIdDisplay">--</strong>
+    </div>
+    <div class="status-sub">
+      Observer PIN<br>
+      <strong style="color:#eaeaea; font-size:20px; letter-spacing:2px;" id="tripPinDisplay">--</strong>
+    </div>
+    <div class="status-sub" style="color:#5a6070;">Share both values with your trusted observer. Both are required to view this trip.</div>
   </div>
 
   <!-- ===== Firebase Status Card (Stage 4A) ===== -->
@@ -352,7 +352,7 @@
     <div class="status-sub" id="firebaseSub">Initializing Firebase Realtime Database connection.</div>
   </div>
 
-  <div class="footer-note">Stage 4B — Live GPS upload to Firebase (testTrip, every 5s). Local monitoring unaffected if cloud sync fails.</div>
+  <div class="footer-note">Stage 4D — Trip ID + PIN access control active. ESP32 fully removed from architecture.</div>
   <div id="errorBox" class="status-sub" style="display:none; color:#f87171; text-align:center;"></div>
 
 </div>
@@ -422,7 +422,7 @@
     });
 
     // ===================================================================
-    // STAGE 4B: Live GPS upload to Firebase.
+    // STAGE 4B/4D: Live GPS upload to Firebase.
     //
     // The main (non-module) script below can't use ES module imports
     // directly, so we expose a single global function here that it can
@@ -431,12 +431,19 @@
     // problem can NEVER interrupt GPS tracking, deviation detection,
     // or the map - those must keep working even if the cloud write fails.
     //
-    // Writes to a fixed 'testTrip' path for now (Stage 4B). Trip ID/PIN
-    // and a real 'trips/RANDOM_ID' path structure come in Stage 4D.
+    // STAGE 4D: writes to 'trips/<tripId>/<pin>' instead of the old fixed
+    // STAGE 4D: writes to 'trips/<tripId>/<pin>'. Both the Trip ID and PIN are required to form the
+    // correct path, so knowing only the Trip ID isn't enough to read or
+    // write this trip's data (assuming database rules are configured to
+    // match - see the rules note provided separately).
     // ===================================================================
-    window.uploadTripDataToFirebase = function (tripData) {
+    window.uploadTripDataToFirebase = function (tripId, pin, tripData) {
+      if (!tripId || !pin) {
+        // No active trip yet - nothing to upload to.
+        return;
+      }
       try {
-        const tripRef = ref(database, 'testTrip');
+        const tripRef = ref(database, 'trips/' + tripId + '/' + pin);
         // update() merges only the given children (location, route,
         // lastUpdate) and leaves any other child - like routeMeta,
         // written separately below - untouched.
@@ -452,14 +459,17 @@
     };
 
     // ===================================================================
-    // STAGE 4C support: upload route metadata (pickup, destination, and
-    // the OSRM route polyline) ONCE whenever a new route is generated -
-    // not on every GPS tick. This lets the observer page draw the same
+    // STAGE 4C/4D support: upload route metadata (pickup, destination,
+    // and the OSRM route polyline) ONCE whenever a new route is generated
+    // - not on every GPS tick. This lets the observer page draw the same
     // route without recalculating anything itself.
     // ===================================================================
-    window.uploadRouteMetaToFirebase = function (routeMeta) {
+    window.uploadRouteMetaToFirebase = function (tripId, pin, routeMeta) {
+      if (!tripId || !pin) {
+        return;
+      }
       try {
-        const tripRef = ref(database, 'testTrip');
+        const tripRef = ref(database, 'trips/' + tripId + '/' + pin);
         update(tripRef, { routeMeta: routeMeta }).catch(function (err) {
           console.warn('Firebase route metadata upload failed:', err.message);
         });
@@ -484,19 +494,44 @@
 
 <script>
   /*
-    STAGE 2 NOTE:
-    This script now implements REAL GPS tracking using
-    navigator.geolocation.watchPosition().
-
-    Still intentionally NOT implemented (per Stage 2 scope):
-    - Route deviation calculation (Route Status stays a placeholder)
-    - ESP32 communication (ESP32 stays in Simulation Mode)
-    - Any map or external API
+    This script implements real GPS tracking using
+    navigator.geolocation.watchPosition(), plus route deviation,
+    destination geofencing, OSRM routing, Leaflet mapping, and Firebase
+    sync (see the various STAGE comments throughout this file for the
+    build history). ESP32 was part of the original project concept but
+    has been fully removed - this is a software-only system.
   */
 
   // ----- Element references -----
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
+
+  const tripCredentialsCard = document.getElementById('tripCredentialsCard');
+  const tripIdDisplay = document.getElementById('tripIdDisplay');
+  const tripPinDisplay = document.getElementById('tripPinDisplay');
+
+  // ----- Stage 4D: Trip ID + PIN state -----
+  // Generated fresh each time START MONITORING is pressed. Both values
+  // together form the Firebase path 'trips/<tripId>/<pin>', so knowing
+  // only one isn't enough to locate the trip's data.
+  let currentTripId = null;
+  let currentTripPin = null;
+
+  // Generates a long random Trip ID. Uses crypto.randomUUID() where
+  // available (all modern browsers over HTTPS, which GitHub Pages is).
+  function generateTripId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    // Fallback for older browsers: still long and random enough for this purpose.
+    return 'trip-' + Date.now() + '-' + Math.random().toString(36).slice(2, 12);
+  }
+
+  // Generates a 6-digit numeric PIN, zero-padded (e.g. "004821").
+  function generateTripPin() {
+    const num = Math.floor(Math.random() * 1000000);
+    return String(num).padStart(6, '0');
+  }
 
   const gpsDot = document.getElementById('gpsDot');
   const gpsLabel = document.getElementById('gpsLabel');
@@ -969,7 +1004,7 @@
           lastUpdate: now
         };
 
-        window.uploadTripDataToFirebase(tripPayload);
+        window.uploadTripDataToFirebase(currentTripId, currentTripPin, tripPayload);
       }
     }
   }
@@ -1020,6 +1055,28 @@
     // session uploads promptly rather than waiting out an old timer
     lastFirebaseUploadTime = 0;
 
+    // Stage 4D: generate a fresh Trip ID + PIN for this session and
+    // display them so the traveler can share them with an observer.
+    currentTripId = generateTripId();
+    currentTripPin = generateTripPin();
+    tripIdDisplay.textContent = currentTripId;
+    tripPinDisplay.textContent = currentTripPin;
+    tripCredentialsCard.style.display = 'block';
+
+    // If pickup/destination/route were already set before this trip
+    // started (the normal flow: SET LOCATIONS, then START MONITORING),
+    // the earlier route metadata upload had no Trip ID to write under
+    // yet. Re-upload it now under the new trip's path so the observer
+    // has the route available from the start.
+    if (pickupCoords && destinationCoords && routeWaypoints.length > 0 &&
+        typeof window.uploadRouteMetaToFirebase === 'function') {
+      window.uploadRouteMetaToFirebase(currentTripId, currentTripPin, {
+        pickup: pickupCoords,
+        destination: destinationCoords,
+        waypoints: routeWaypoints
+      });
+    }
+
     const options = {
       enableHighAccuracy: true,
       maximumAge: 0,
@@ -1051,6 +1108,12 @@
 
     // Stage 3C: remove the live position marker but keep the route line visible.
     removeLiveMarkerFromMap();
+
+    // Stage 4D: trip session ended - stop showing credentials for a
+    // trip that's no longer being monitored/uploaded.
+    currentTripId = null;
+    currentTripPin = null;
+    tripCredentialsCard.style.display = 'none';
 
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -1230,7 +1293,7 @@
       // needing its own OSRM call. This is a one-time write per route
       // generation, not part of the throttled 5-second location upload.
       if (typeof window.uploadRouteMetaToFirebase === 'function') {
-        window.uploadRouteMetaToFirebase({
+        window.uploadRouteMetaToFirebase(currentTripId, currentTripPin, {
           pickup: pickup,
           destination: destination,
           waypoints: routeWaypoints
