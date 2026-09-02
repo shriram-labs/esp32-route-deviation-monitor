@@ -264,20 +264,39 @@
     <p>GPS-Based Intelligent Monitoring System</p>
   </div>
 
-  <!-- ===== Trip Details Card (pickup auto-detected, destination geocoded) ===== -->
+  <!-- ===== Trip Details Card (5A: choice of pickup mode + destination) ===== -->
   <div class="card">
     <div class="card-title">Trip Details</div>
 
     <div class="field-group">
-      <label>Your Location (Pickup)</label>
-      <div class="status-row" style="padding:11px 12px; background-color:#12141a; border:1px solid #2a2d35; border-radius:8px;">
-        <div class="status-left">
-          <span class="dot dot-waiting" id="locationDetectDot"></span>
-          <span class="status-label" id="locationDetectLabel" style="font-size:14px;">Detecting your location...</span>
-        </div>
-        <button id="retryLocationBtn" style="flex:none; width:auto; padding:6px 10px; font-size:11px; background-color:#2a2d35; color:#9aa0aa;">RETRY</button>
+      <label>Start Location</label>
+      <div style="display:flex; gap:16px; margin-bottom:10px; font-size:13px; color:#cfd3da;">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          <input type="radio" name="pickupMode" id="pickupModeDetect" value="detect" checked style="width:auto;">
+          Detect My Current Location
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          <input type="radio" name="pickupMode" id="pickupModeManual" value="manual" style="width:auto;">
+          Enter Starting Location
+        </label>
       </div>
-      <div class="status-sub" id="locationDetectSub" style="margin-top:6px;">Waiting for a GPS fix...</div>
+
+      <!-- Shown when "Detect My Current Location" is selected -->
+      <div id="pickupDetectSection">
+        <div class="status-row" style="padding:11px 12px; background-color:#12141a; border:1px solid #2a2d35; border-radius:8px;">
+          <div class="status-left">
+            <span class="dot dot-waiting" id="locationDetectDot"></span>
+            <span class="status-label" id="locationDetectLabel" style="font-size:14px;">Detecting your location...</span>
+          </div>
+          <button id="retryLocationBtn" style="flex:none; width:auto; padding:6px 10px; font-size:11px; background-color:#2a2d35; color:#9aa0aa;">RETRY</button>
+        </div>
+        <div class="status-sub" id="locationDetectSub" style="margin-top:6px;">Waiting for a GPS fix...</div>
+      </div>
+
+      <!-- Shown when "Enter Starting Location" is selected -->
+      <div id="pickupManualSection" style="display:none;">
+        <input type="text" id="pickupInput" placeholder="e.g. Khammam Bus Stand">
+      </div>
     </div>
 
     <div class="field-group">
@@ -1224,14 +1243,15 @@
   stopBtn.addEventListener('click', stopMonitoring);
 
   // ===================================================================
-  // CURRENT-LOCATION PICKUP: auto-detect the traveler's starting point
-  // using the phone's GPS, instead of requiring manual pickup entry.
-  // Destination is still entered as text and geocoded via Nominatim.
+  // 5A: PICKUP LOCATION UX - two modes, traveler's choice:
+  //   1. Detect My Current Location (default) - uses the phone's GPS
+  //   2. Enter Starting Location - manually typed and geocoded via
+  //      Nominatim, same as the destination field
   //
-  // On page load, we gather a few GPS samples over a short window and
-  // keep the one with the best (lowest) accuracy value, rather than
-  // just using the very first reading - phone GPS often takes a couple
-  // of seconds to settle after a cold start.
+  // For auto-detect mode, we gather a few GPS samples over a short
+  // window and keep the one with the best (lowest) accuracy value,
+  // rather than just using the very first reading - phone GPS often
+  // takes a couple of seconds to settle after a cold start.
   // ===================================================================
 
   const locationDetectDot = document.getElementById('locationDetectDot');
@@ -1239,13 +1259,20 @@
   const locationDetectSub = document.getElementById('locationDetectSub');
   const retryLocationBtn = document.getElementById('retryLocationBtn');
 
+  const pickupModeDetect = document.getElementById('pickupModeDetect');
+  const pickupModeManual = document.getElementById('pickupModeManual');
+  const pickupDetectSection = document.getElementById('pickupDetectSection');
+  const pickupManualSection = document.getElementById('pickupManualSection');
+  const pickupInput = document.getElementById('pickupInput');
+
   const destinationInput = document.getElementById('destinationInput');
   const geocodeBtn = document.getElementById('geocodeBtn');
   const tripResult = document.getElementById('tripResult');
   const tripError = document.getElementById('tripError');
   const routeFetchResult = document.getElementById('routeFetchResult');
 
-  // Stores the detected pickup / geocoded destination coordinates.
+  // Stores the pickup (from GPS detection OR manual geocoding) and
+  // geocoded destination coordinates.
   let pickupCoords = null;
   let destinationCoords = null;
 
@@ -1275,6 +1302,44 @@
     locationDetectSub.textContent = subText;
   }
 
+  // ===================================================================
+  // 5A: Pickup mode switching (detect current location vs manual entry)
+  // ===================================================================
+  function stopLocationDetection() {
+    if (locationDetectionWatchId !== null) {
+      navigator.geolocation.clearWatch(locationDetectionWatchId);
+      locationDetectionWatchId = null;
+    }
+    if (locationDetectionTimeoutHandle !== null) {
+      clearTimeout(locationDetectionTimeoutHandle);
+      locationDetectionTimeoutHandle = null;
+    }
+  }
+
+  function handlePickupModeChange() {
+    pickupCoords = null;
+    clearTripError();
+
+    if (pickupModeDetect.checked) {
+      pickupManualSection.style.display = 'none';
+      pickupDetectSection.style.display = 'block';
+      geocodeBtn.disabled = true; // re-enabled once detection finds a fix
+      startLocationDetection();
+    } else {
+      stopLocationDetection();
+      pickupDetectSection.style.display = 'none';
+      pickupManualSection.style.display = 'block';
+      pickupInput.value = '';
+      // Manual mode has no detection callback to enable this later -
+      // validation happens on submit instead (handleSetLocations checks
+      // that the pickup text isn't empty).
+      geocodeBtn.disabled = false;
+    }
+  }
+
+  pickupModeDetect.addEventListener('change', handlePickupModeChange);
+  pickupModeManual.addEventListener('change', handlePickupModeChange);
+
   function startLocationDetection() {
     if (!navigator.geolocation) {
       setLocationDetectStatus('dot-error', 'Not supported', 'This browser does not support geolocation.');
@@ -1287,12 +1352,7 @@
     geocodeBtn.disabled = true;
     setLocationDetectStatus('dot-waiting', 'Detecting your location...', 'Waiting for a stable GPS fix (up to 6 seconds)...');
 
-    if (locationDetectionWatchId !== null) {
-      navigator.geolocation.clearWatch(locationDetectionWatchId);
-    }
-    if (locationDetectionTimeoutHandle !== null) {
-      clearTimeout(locationDetectionTimeoutHandle);
-    }
+    stopLocationDetection();
 
     const options = {
       enableHighAccuracy: true,
@@ -1322,13 +1382,12 @@
   }
 
   function finalizeLocationDetection() {
-    if (locationDetectionWatchId !== null) {
-      navigator.geolocation.clearWatch(locationDetectionWatchId);
-      locationDetectionWatchId = null;
-    }
-    if (locationDetectionTimeoutHandle !== null) {
-      clearTimeout(locationDetectionTimeoutHandle);
-      locationDetectionTimeoutHandle = null;
+    stopLocationDetection();
+
+    // If the traveler switched to manual mode while detection was running,
+    // don't overwrite their choice with a stale detection result.
+    if (!pickupModeDetect.checked) {
+      return;
     }
 
     if (locationDetectionSamples.length === 0) {
@@ -1351,8 +1410,9 @@
 
   retryLocationBtn.addEventListener('click', startLocationDetection);
 
-  // Kick off detection as soon as the page loads, so it's usually ready
-  // by the time the traveler has typed a destination.
+  // Kick off detection as soon as the page loads (default mode is
+  // "Detect My Current Location"), so it's usually ready by the time
+  // the traveler has typed a destination.
   startLocationDetection();
 
   // Calls the free Nominatim search API to turn a place name into
@@ -1388,10 +1448,17 @@
 
   async function handleSetLocations() {
     const destinationText = destinationInput.value.trim();
+    const usingManualPickup = pickupModeManual.checked;
 
     clearTripError();
 
-    if (!pickupCoords) {
+    if (usingManualPickup) {
+      const pickupText = pickupInput.value.trim();
+      if (!pickupText) {
+        showTripError('Please enter a starting location.');
+        return;
+      }
+    } else if (!pickupCoords) {
       showTripError('Still detecting your current location. Please wait a moment, or tap RETRY.');
       return;
     }
@@ -1403,9 +1470,22 @@
 
     geocodeBtn.disabled = true;
     geocodeBtn.textContent = 'LOCATING...';
-    tripResult.textContent = 'Looking up destination...';
+    tripResult.textContent = usingManualPickup ? 'Looking up locations...' : 'Looking up destination...';
 
     try {
+      // Nominatim's usage policy asks for sequential requests, so we
+      // geocode pickup (if manual) then destination one at a time.
+      if (usingManualPickup) {
+        const pickupText = pickupInput.value.trim();
+        const pickupResult = await geocodePlace(pickupText);
+        if (!pickupResult) {
+          showTripError('Could not find starting location: "' + pickupText + '"');
+          tripResult.textContent = 'No trip set up yet.';
+          return;
+        }
+        pickupCoords = { lat: pickupResult.lat, lon: pickupResult.lon };
+      }
+
       const destinationResult = await geocodePlace(destinationText);
       if (!destinationResult) {
         showTripError('Could not find destination: "' + destinationText + '"');
@@ -1415,8 +1495,9 @@
 
       destinationCoords = { lat: destinationResult.lat, lon: destinationResult.lon };
 
+      const pickupLabel = usingManualPickup ? 'Pickup' : 'Pickup (your location)';
       tripResult.innerHTML =
-        '<strong>Pickup (your location):</strong> ' + pickupCoords.lat.toFixed(6) + ', ' + pickupCoords.lon.toFixed(6) + '<br>' +
+        '<strong>' + pickupLabel + ':</strong> ' + pickupCoords.lat.toFixed(6) + ', ' + pickupCoords.lon.toFixed(6) + '<br>' +
         '<strong>Destination:</strong> ' + destinationCoords.lat.toFixed(6) + ', ' + destinationCoords.lon.toFixed(6);
 
       // ----- Stage 3B: fetch the real road route from OSRM -----
@@ -1424,7 +1505,7 @@
       await fetchRouteFromOSRM(pickupCoords, destinationCoords);
 
     } catch (err) {
-      showTripError('Something went wrong while looking up the destination. Please check your internet connection and try again.');
+      showTripError('Something went wrong while looking up locations. Please check your internet connection and try again.');
       tripResult.textContent = 'No trip set up yet.';
     } finally {
       geocodeBtn.disabled = false;
