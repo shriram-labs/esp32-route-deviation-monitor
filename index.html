@@ -474,7 +474,11 @@
         // update() merges only the given children (location, route,
         // lastUpdate) and leaves any other child - like routeMeta,
         // written separately below - untouched.
-        update(tripRef, tripData).catch(function (err) {
+        update(tripRef, tripData).then(function () {
+          // TEMP DEBUG - remove after diagnosis
+          console.log('[5C DEBUG] Firebase write SUCCEEDED for trips/' + tripId + '/' + pin,
+            'alertActive =', tripData.route ? tripData.route.alertActive : '(no route field)');
+        }).catch(function (err) {
           // Silent-ish failure: just log it, don't disrupt the UI or
           // local monitoring. The Cloud Sync Status card already shows
           // the last known connection state from the 4A test above.
@@ -854,6 +858,11 @@
   // returns, with that already-confirmed state as input.
   function updateSustainedDeviationTracking(confirmedState) {
     if (confirmedState !== 'deviated') {
+      // TEMP DEBUG - remove after diagnosis
+      if (deviationStartTime !== null) {
+        console.log('[5B DEBUG] confirmedState back to onroute/other - resetting timer. Was tracking for',
+          ((Date.now() - deviationStartTime) / 1000).toFixed(1), 'sec');
+      }
       // Back on route (or not yet evaluated) - clear any in-progress
       // deviation timer and reset the single-shot alert so a future
       // deviation can trigger it again.
@@ -866,12 +875,19 @@
     if (deviationStartTime === null) {
       // Just entered a confirmed-deviated streak - start the clock.
       deviationStartTime = Date.now();
+      console.log('[5B DEBUG] Deviation timer STARTED at', new Date().toLocaleTimeString());
       return;
     }
+
+    // TEMP DEBUG - remove after diagnosis
+    const elapsedSec = (Date.now() - deviationStartTime) / 1000;
+    console.log('[5B DEBUG] Still deviated. Elapsed:', elapsedSec.toFixed(1),
+      'sec / needs', (SUSTAINED_DEVIATION_ALERT_MS / 1000), 'sec. alertActive currently:', sustainedDeviationAlertActive);
 
     if (!sustainedDeviationAlertActive &&
         (Date.now() - deviationStartTime) >= SUSTAINED_DEVIATION_ALERT_MS) {
       sustainedDeviationAlertActive = true;
+      console.log('[5B DEBUG] *** sustainedDeviationAlertActive is now TRUE ***');
       // Single-shot: this flag stays true (no repeated triggering) until
       // updateSustainedDeviationTracking() sees a non-'deviated' state above.
     }
@@ -1200,6 +1216,10 @@
         };
 
         window.uploadTripDataToFirebase(currentTripId, currentTripPin, tripPayload);
+
+        // TEMP DEBUG - remove after diagnosis
+        console.log('[5B/5C DEBUG] Uploaded to Firebase. route.alertActive =', tripPayload.route.alertActive,
+          '| status =', tripPayload.route.status, '| tripId set?', currentTripId !== null);
       }
 
       // Upload this point to the traveled-path history too, at the same
