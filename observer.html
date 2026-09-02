@@ -281,12 +281,14 @@
       <div class="status-sub" id="gpsSub">Latitude: -- &nbsp; Longitude: -- &nbsp; Accuracy: --</div>
     </div>
 
-    <!-- ===== Sustained Deviation Alert Banner (Stage 5C) ===== -->
-    <!-- Hidden by default; shown only when data.route.alertActive is true -->
+    <!-- ===== Sustained Deviation Alert Banner (Stage 5C/5D) ===== -->
+    <!-- Hidden by default; shown only when data.route.alertActive is true.
+         Title text is set dynamically to show severity + alert count,
+         e.g. "Severe Route Deviation - Alert #4" -->
     <div id="deviationAlertBanner" style="display:none; background-color:#3a1919; border:1px solid #f87171; border-radius:12px; padding:14px 16px; align-items:center; gap:10px;">
       <span style="font-size:20px;">⚠️</span>
       <div>
-        <div style="font-size:14px; font-weight:700; color:#f87171;">Sustained Deviation Alert</div>
+        <div style="font-size:14px; font-weight:700; color:#f87171;" id="deviationAlertTitle">Sustained Deviation Alert</div>
         <div style="font-size:12px; color:#f2a9a9; margin-top:2px;">Traveler has remained off-route for an extended period.</div>
       </div>
     </div>
@@ -367,6 +369,7 @@
   const routeLabel = document.getElementById('routeLabel');
   const routeSub = document.getElementById('routeSub');
   const deviationAlertBanner = document.getElementById('deviationAlertBanner');
+  const deviationAlertTitle = document.getElementById('deviationAlertTitle');
 
   const lastUpdateText = document.getElementById('lastUpdateText');
   const errorBox = document.getElementById('errorBox');
@@ -509,6 +512,17 @@
     return (meters / 1000).toFixed(2) + ' km';
   }
 
+  // 5D: Turns the raw alertLevel value ('mild' | 'moderate' | 'severe')
+  // into the capitalized label used in the banner title. Falls back to
+  // a generic label if the level is missing for any reason (e.g. an
+  // older payload written before this field existed).
+  function formatSeverityLabel(level) {
+    if (level === 'mild') return 'Mild';
+    if (level === 'moderate') return 'Moderate';
+    if (level === 'severe') return 'Severe';
+    return 'Sustained';
+  }
+
   function routeStatusToDotClass(status) {
     if (status === 'On Route') return 'dot-onroute';
     if (status === 'Deviated') return 'dot-deviated';
@@ -640,9 +654,6 @@
 
       // ----- Route status -----
       if (data.route) {
-        // TEMP DEBUG - remove after diagnosis
-        console.log('[5C DEBUG - Observer] Received route data:', JSON.stringify(data.route));
-
         routeDot.className = 'dot ' + routeStatusToDotClass(data.route.status);
         routeLabel.textContent = data.route.status || 'Unknown';
 
@@ -653,15 +664,19 @@
           'Distance from route: ' + distanceFromRouteText + '<br>' +
           'Distance to destination: ' + destinationDistanceText;
 
-        // STAGE 5C: sustained-deviation alert banner. Purely visual -
-        // reads the single new alertActive field, doesn't touch any of
-        // the distance/status fields or logic above.
+        // STAGE 5D: sustained-deviation alert banner, now showing
+        // severity + alert count (e.g. "Severe Route Deviation - Alert #4").
+        // Visibility is still gated on the same alertActive field as
+        // Stage 5C; alertLevel/alertCount are additive fields only used
+        // for the displayed text.
         const shouldShowBanner = data.route.alertActive === true;
         deviationAlertBanner.style.display = shouldShowBanner ? 'flex' : 'none';
 
-        // TEMP DEBUG - remove after diagnosis
-        console.log('[5C DEBUG - Observer] alertActive value:', data.route.alertActive,
-          '(type:', typeof data.route.alertActive, ') -> banner display set to:', deviationAlertBanner.style.display);
+        if (shouldShowBanner) {
+          const severityLabel = formatSeverityLabel(data.route.alertLevel);
+          const count = data.route.alertCount || 1;
+          deviationAlertTitle.textContent = severityLabel + ' Route Deviation - Alert #' + count;
+        }
       }
 
       // ----- Last update timestamp -----
