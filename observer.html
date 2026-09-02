@@ -281,6 +281,16 @@
       <div class="status-sub" id="gpsSub">Latitude: -- &nbsp; Longitude: -- &nbsp; Accuracy: --</div>
     </div>
 
+    <!-- ===== Sustained Deviation Alert Banner (Stage 5C) ===== -->
+    <!-- Hidden by default; shown only when data.route.alertActive is true -->
+    <div id="deviationAlertBanner" style="display:none; background-color:#3a1919; border:1px solid #f87171; border-radius:12px; padding:14px 16px; align-items:center; gap:10px;">
+      <span style="font-size:20px;">⚠️</span>
+      <div>
+        <div style="font-size:14px; font-weight:700; color:#f87171;">Sustained Deviation Alert</div>
+        <div style="font-size:12px; color:#f2a9a9; margin-top:2px;">Traveler has remained off-route for an extended period.</div>
+      </div>
+    </div>
+
     <!-- ===== Route Status ===== -->
     <div class="card">
       <div class="card-title">Route Status</div>
@@ -356,6 +366,7 @@
   const routeDot = document.getElementById('routeDot');
   const routeLabel = document.getElementById('routeLabel');
   const routeSub = document.getElementById('routeSub');
+  const deviationAlertBanner = document.getElementById('deviationAlertBanner');
 
   const lastUpdateText = document.getElementById('lastUpdateText');
   const errorBox = document.getElementById('errorBox');
@@ -638,6 +649,11 @@
         routeSub.innerHTML =
           'Distance from route: ' + distanceFromRouteText + '<br>' +
           'Distance to destination: ' + destinationDistanceText;
+
+        // STAGE 5C: sustained-deviation alert banner. Purely visual -
+        // reads the single new alertActive field, doesn't touch any of
+        // the distance/status fields or logic above.
+        deviationAlertBanner.style.display = data.route.alertActive ? 'flex' : 'none';
       }
 
       // ----- Last update timestamp -----
