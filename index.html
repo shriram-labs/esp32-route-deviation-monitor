@@ -474,11 +474,7 @@
         // update() merges only the given children (location, route,
         // lastUpdate) and leaves any other child - like routeMeta,
         // written separately below - untouched.
-        update(tripRef, tripData).then(function () {
-          // TEMP DEBUG - remove after diagnosis
-          console.log('[5C DEBUG] Firebase write SUCCEEDED for trips/' + tripId + '/' + pin,
-            'alertActive =', tripData.route ? tripData.route.alertActive : '(no route field)');
-        }).catch(function (err) {
+        update(tripRef, tripData).catch(function (err) {
           // Silent-ish failure: just log it, don't disrupt the UI or
           // local monitoring. The Cloud Sync Status card already shows
           // the last known connection state from the 4A test above.
@@ -834,40 +830,105 @@
   // COUNT (3 consecutive readings) to decide confirmedRouteState. This
   // layer instead watches WALL-CLOCK TIME: once confirmedRouteState has
   // been 'deviated' continuously for SUSTAINED_DEVIATION_ALERT_MS, it
-  // raises a single-shot alert flag. It never modifies confirmedRouteState
-  // or any of the debounce/hysteresis logic above - it only reads the
-  // already-confirmed result.
+  // fires alert #1. It never modifies confirmedRouteState or any of the
+  // debounce/hysteresis logic above - it only reads the already-confirmed
+  // result.
+  //
+  // STAGE 5D (this pass): distance-based re-alert escalation, layered on
+  // top of the above. Once alert #1 has fired, subsequent alerts repeat
+  // at an interval that depends on how far the traveler currently is from
+  // the route - closer deviations re-alert less often, farther ones more
+  // often - continuing indefinitely until the traveler returns on-route
+  // or reaches the destination. This does not change when alert #1 fires
+  // or the debounce/hysteresis above; it only governs alerts AFTER #1.
   // ===================================================================
 
-  // Temporary demo value (30 seconds). Stage 5D/5E tune this same
-  // constant to a realistic value (e.g. 5-10 minutes) without needing
-  // to change any of the logic below.
-  const SUSTAINED_DEVIATION_ALERT_MS = 30000;
+  // Time from confirmed deviation until alert #1 fires.
+  const SUSTAINED_DEVIATION_ALERT_MS = 45000;
+
+  // Distance tiers for re-alert escalation (metres), each with its own
+  // repeat interval. Boundaries have a 15 m hysteresis buffer applied in
+  // classifyAlertTier() below, so a distance oscillating right at 100 m
+  // or 300 m doesn't flap the severity label back and forth.
+  const ALERT_TIER_HYSTERESIS_METERS = 15;
+  const ALERT_TIER_MILD_MODERATE_BOUNDARY = 100;   // 30-100m = mild, >100m = moderate+
+  const ALERT_TIER_MODERATE_SEVERE_BOUNDARY = 300; // 100-300m = moderate, >300m = severe
+
+  const ALERT_INTERVAL_MILD_MS = 3 * 60 * 1000;     // 3 min
+  const ALERT_INTERVAL_MODERATE_MS = 2 * 60 * 1000; // 2 min
+  const ALERT_INTERVAL_SEVERE_MS = 30 * 1000;       // 30 sec
+
+  // Explicit anti-spam floor: no re-alert may fire faster than this,
+  // regardless of tier. The severe tier's interval already equals this
+  // value by design, but this Math.max() safeguard is kept as an
+  // independent guarantee in case tier intervals are ever retuned.
+  const ALERT_MIN_INTERVAL_MS = 30 * 1000;
 
   // Timestamp (Date.now()) when the current CONFIRMED deviation streak
   // began, or null if not currently in a confirmed-deviated streak.
   let deviationStartTime = null;
 
-  // Single-shot alert flag: becomes true once the sustained duration is
-  // reached, and stays true until confirmedRouteState returns to
-  // 'onroute' (or the destination is reached), at which point it resets
-  // so a future deviation can trigger the alert again.
+  // True from the moment alert #1 fires until the deviation resolves
+  // (return to on-route, or destination reached). Kept for backward
+  // compatibility with the existing Stage 5C observer banner toggle.
   let sustainedDeviationAlertActive = false;
 
+  // STAGE 5D escalation state - all reset together with the above.
+  let currentAlertTier = null;   // 'mild' | 'moderate' | 'severe' | null
+  let alertCount = 0;            // increments on every fired alert, starting at 1
+  let lastAlertTime = null;      // timestamp of the most recently fired alert
+
+  // Classifies a distance into a severity tier, applying hysteresis
+  // relative to the CURRENT tier so the label doesn't flap when the
+  // distance sits close to a boundary. When there is no current tier yet
+  // (classifying for alert #1), plain boundaries are used since there's
+  // no prior label to protect from flapping.
+  function classifyAlertTier(distance, currentTier) {
+    const upMildToModerate = ALERT_TIER_MILD_MODERATE_BOUNDARY + ALERT_TIER_HYSTERESIS_METERS;
+    const downModerateToMild = ALERT_TIER_MILD_MODERATE_BOUNDARY - ALERT_TIER_HYSTERESIS_METERS;
+    const upModerateToSevere = ALERT_TIER_MODERATE_SEVERE_BOUNDARY + ALERT_TIER_HYSTERESIS_METERS;
+    const downSevereToModerate = ALERT_TIER_MODERATE_SEVERE_BOUNDARY - ALERT_TIER_HYSTERESIS_METERS;
+
+    if (currentTier === null) {
+      // Initial classification (alert #1) - no prior label to protect.
+      if (distance > ALERT_TIER_MODERATE_SEVERE_BOUNDARY) return 'severe';
+      if (distance > ALERT_TIER_MILD_MODERATE_BOUNDARY) return 'moderate';
+      return 'mild';
+    }
+
+    if (currentTier === 'mild') {
+      return (distance > upMildToModerate) ? 'moderate' : 'mild';
+    }
+
+    if (currentTier === 'moderate') {
+      if (distance > upModerateToSevere) return 'severe';
+      if (distance < downModerateToMild) return 'mild';
+      return 'moderate';
+    }
+
+    // currentTier === 'severe'
+    return (distance < downSevereToModerate) ? 'moderate' : 'severe';
+  }
+
+  function getAlertIntervalForTier(tier) {
+    if (tier === 'mild') return ALERT_INTERVAL_MILD_MS;
+    if (tier === 'moderate') return ALERT_INTERVAL_MODERATE_MS;
+    return ALERT_INTERVAL_SEVERE_MS; // 'severe'
+  }
+
   // Called once per handleSuccess(), immediately after evaluateRouteState()
-  // returns, with that already-confirmed state as input.
-  function updateSustainedDeviationTracking(confirmedState) {
+  // returns, with that already-confirmed state and the current distance
+  // (in metres) as input.
+  function updateSustainedDeviationTracking(confirmedState, distance) {
     if (confirmedState !== 'deviated') {
-      // TEMP DEBUG - remove after diagnosis
-      if (deviationStartTime !== null) {
-        console.log('[5B DEBUG] confirmedState back to onroute/other - resetting timer. Was tracking for',
-          ((Date.now() - deviationStartTime) / 1000).toFixed(1), 'sec');
-      }
-      // Back on route (or not yet evaluated) - clear any in-progress
-      // deviation timer and reset the single-shot alert so a future
-      // deviation can trigger it again.
+      // Back on route (or not yet evaluated) - clear the deviation timer
+      // and all escalation state, so a future deviation starts fresh
+      // (a new alert #1, new tier, new count).
       deviationStartTime = null;
       sustainedDeviationAlertActive = false;
+      currentAlertTier = null;
+      alertCount = 0;
+      lastAlertTime = null;
       return;
     }
 
@@ -875,30 +936,42 @@
     if (deviationStartTime === null) {
       // Just entered a confirmed-deviated streak - start the clock.
       deviationStartTime = Date.now();
-      console.log('[5B DEBUG] Deviation timer STARTED at', new Date().toLocaleTimeString());
       return;
     }
 
-    // TEMP DEBUG - remove after diagnosis
-    const elapsedSec = (Date.now() - deviationStartTime) / 1000;
-    console.log('[5B DEBUG] Still deviated. Elapsed:', elapsedSec.toFixed(1),
-      'sec / needs', (SUSTAINED_DEVIATION_ALERT_MS / 1000), 'sec. alertActive currently:', sustainedDeviationAlertActive);
+    if (!sustainedDeviationAlertActive) {
+      // Waiting for alert #1's fixed delay to elapse.
+      if ((Date.now() - deviationStartTime) >= SUSTAINED_DEVIATION_ALERT_MS) {
+        sustainedDeviationAlertActive = true;
+        alertCount = 1;
+        currentAlertTier = classifyAlertTier(distance, null);
+        lastAlertTime = Date.now();
+      }
+      return;
+    }
 
-    if (!sustainedDeviationAlertActive &&
-        (Date.now() - deviationStartTime) >= SUSTAINED_DEVIATION_ALERT_MS) {
-      sustainedDeviationAlertActive = true;
-      console.log('[5B DEBUG] *** sustainedDeviationAlertActive is now TRUE ***');
-      // Single-shot: this flag stays true (no repeated triggering) until
-      // updateSustainedDeviationTracking() sees a non-'deviated' state above.
+    // Alert #1 has already fired - escalation mode. Re-classify tier
+    // live against the CURRENT distance (with hysteresis), then check
+    // whether enough time has passed for that tier's interval.
+    currentAlertTier = classifyAlertTier(distance, currentAlertTier);
+    const interval = Math.max(getAlertIntervalForTier(currentAlertTier), ALERT_MIN_INTERVAL_MS);
+
+    if ((Date.now() - lastAlertTime) >= interval) {
+      alertCount++;
+      lastAlertTime = Date.now();
     }
   }
 
   // Explicit reset used when the destination geofence is reached while a
   // deviation timer might still be running - arriving successfully makes
-  // an in-progress deviation timer moot.
+  // an in-progress deviation timer moot. Also used on start/stop
+  // monitoring so no state carries over between trips.
   function cancelSustainedDeviationTracking() {
     deviationStartTime = null;
     sustainedDeviationAlertActive = false;
+    currentAlertTier = null;
+    alertCount = 0;
+    lastAlertTime = null;
   }
 
   // ----- Distance calculation helpers -----
@@ -1119,7 +1192,7 @@
 
       // STAGE 5B: sustained-deviation tracking, purely observes the
       // already-confirmed state above - does not affect it in any way.
-      updateSustainedDeviationTracking(confirmedState);
+      updateSustainedDeviationTracking(confirmedState, distance);
 
       // Show how many consecutive readings are pending confirmation,
       // so it's visible during testing/demo that this isn't reacting
@@ -1210,16 +1283,14 @@
             distanceFromRoute: uploadDistanceFromRoute,
             deviationThreshold: DEVIATION_THRESHOLD_METERS,
             destinationDistance: uploadDestinationDistance,
-            alertActive: sustainedDeviationAlertActive
+            alertActive: sustainedDeviationAlertActive,
+            alertLevel: currentAlertTier,
+            alertCount: alertCount
           },
           lastUpdate: now
         };
 
         window.uploadTripDataToFirebase(currentTripId, currentTripPin, tripPayload);
-
-        // TEMP DEBUG - remove after diagnosis
-        console.log('[5B/5C DEBUG] Uploaded to Firebase. route.alertActive =', tripPayload.route.alertActive,
-          '| status =', tripPayload.route.status, '| tripId set?', currentTripId !== null);
       }
 
       // Upload this point to the traveled-path history too, at the same
