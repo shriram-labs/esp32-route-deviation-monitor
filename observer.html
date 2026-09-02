@@ -485,6 +485,19 @@
     return date.toLocaleTimeString('en-GB');
   }
 
+  // 5A: Distance display formatting (presentation only - the traveler's
+  // phone still uploads raw metre values; this only affects how they're
+  // shown here). < 500 m -> metres, >= 500 m -> km.
+  function formatDistance(meters) {
+    if (meters === null || meters === undefined || isNaN(meters)) {
+      return '--';
+    }
+    if (meters < 500) {
+      return meters.toFixed(1) + ' m';
+    }
+    return (meters / 1000).toFixed(2) + ' km';
+  }
+
   function routeStatusToDotClass(status) {
     if (status === 'On Route') return 'dot-onroute';
     if (status === 'Deviated') return 'dot-deviated';
@@ -619,15 +632,8 @@
         routeDot.className = 'dot ' + routeStatusToDotClass(data.route.status);
         routeLabel.textContent = data.route.status || 'Unknown';
 
-        const distanceFromRouteText =
-          (data.route.distanceFromRoute !== null && data.route.distanceFromRoute !== undefined)
-            ? data.route.distanceFromRoute.toFixed(1) + ' m'
-            : '--';
-
-        const destinationDistanceText =
-          (data.route.destinationDistance !== null && data.route.destinationDistance !== undefined)
-            ? data.route.destinationDistance.toFixed(1) + ' m'
-            : '--';
+        const distanceFromRouteText = formatDistance(data.route.distanceFromRoute);
+        const destinationDistanceText = formatDistance(data.route.destinationDistance);
 
         routeSub.innerHTML =
           'Distance from route: ' + distanceFromRouteText + '<br>' +
