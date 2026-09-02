@@ -822,6 +822,69 @@
   let consecutiveOverThreshold = 0;
   let consecutiveUnderThreshold = 0;
 
+  // ===================================================================
+  // STAGE 5B: Sustained deviation alert logic
+  //
+  // This is a SEPARATE, higher-level layer on top of evaluateRouteState()
+  // above. That function already debounces GPS noise using a reading
+  // COUNT (3 consecutive readings) to decide confirmedRouteState. This
+  // layer instead watches WALL-CLOCK TIME: once confirmedRouteState has
+  // been 'deviated' continuously for SUSTAINED_DEVIATION_ALERT_MS, it
+  // raises a single-shot alert flag. It never modifies confirmedRouteState
+  // or any of the debounce/hysteresis logic above - it only reads the
+  // already-confirmed result.
+  // ===================================================================
+
+  // Temporary demo value (30 seconds). Stage 5D/5E tune this same
+  // constant to a realistic value (e.g. 5-10 minutes) without needing
+  // to change any of the logic below.
+  const SUSTAINED_DEVIATION_ALERT_MS = 30000;
+
+  // Timestamp (Date.now()) when the current CONFIRMED deviation streak
+  // began, or null if not currently in a confirmed-deviated streak.
+  let deviationStartTime = null;
+
+  // Single-shot alert flag: becomes true once the sustained duration is
+  // reached, and stays true until confirmedRouteState returns to
+  // 'onroute' (or the destination is reached), at which point it resets
+  // so a future deviation can trigger the alert again.
+  let sustainedDeviationAlertActive = false;
+
+  // Called once per handleSuccess(), immediately after evaluateRouteState()
+  // returns, with that already-confirmed state as input.
+  function updateSustainedDeviationTracking(confirmedState) {
+    if (confirmedState !== 'deviated') {
+      // Back on route (or not yet evaluated) - clear any in-progress
+      // deviation timer and reset the single-shot alert so a future
+      // deviation can trigger it again.
+      deviationStartTime = null;
+      sustainedDeviationAlertActive = false;
+      return;
+    }
+
+    // confirmedState === 'deviated'
+    if (deviationStartTime === null) {
+      // Just entered a confirmed-deviated streak - start the clock.
+      deviationStartTime = Date.now();
+      return;
+    }
+
+    if (!sustainedDeviationAlertActive &&
+        (Date.now() - deviationStartTime) >= SUSTAINED_DEVIATION_ALERT_MS) {
+      sustainedDeviationAlertActive = true;
+      // Single-shot: this flag stays true (no repeated triggering) until
+      // updateSustainedDeviationTracking() sees a non-'deviated' state above.
+    }
+  }
+
+  // Explicit reset used when the destination geofence is reached while a
+  // deviation timer might still be running - arriving successfully makes
+  // an in-progress deviation timer moot.
+  function cancelSustainedDeviationTracking() {
+    deviationStartTime = null;
+    sustainedDeviationAlertActive = false;
+  }
+
   // ----- Distance calculation helpers -----
 
   // ===================================================================
@@ -1038,6 +1101,10 @@
     } else {
       const confirmedState = evaluateRouteState(distance);
 
+      // STAGE 5B: sustained-deviation tracking, purely observes the
+      // already-confirmed state above - does not affect it in any way.
+      updateSustainedDeviationTracking(confirmedState);
+
       // Show how many consecutive readings are pending confirmation,
       // so it's visible during testing/demo that this isn't reacting
       // to a single reading.
@@ -1074,6 +1141,11 @@
 
       if (!destinationReached && distanceToDestination <= DESTINATION_GEOFENCE_RADIUS_METERS) {
         destinationReached = true;
+
+        // STAGE 5B: arriving successfully makes an in-progress deviation
+        // timer moot - cancel it rather than letting an alert fire after
+        // the trip has effectively ended.
+        cancelSustainedDeviationTracking();
       }
 
       if (destinationReached) {
@@ -1185,6 +1257,10 @@
     // Stage 3E: a fresh trip means the destination hasn't been reached yet
     destinationReached = false;
 
+    // Stage 5B: a fresh trip means no sustained deviation timer/alert
+    // should carry over from a previous session
+    cancelSustainedDeviationTracking();
+
     // Stage 4B: reset upload throttle so the first reading of a new
     // session uploads promptly rather than waiting out an old timer
     lastFirebaseUploadTime = 0;
@@ -1242,6 +1318,10 @@
     confirmedRouteState = 'onroute';
     consecutiveOverThreshold = 0;
     consecutiveUnderThreshold = 0;
+
+    // Stage 5B: a stopped trip shouldn't leave a deviation timer/alert
+    // active for whenever monitoring is next started
+    cancelSustainedDeviationTracking();
 
     // Stage 3C: remove the live position marker but keep the route line visible.
     removeLiveMarkerFromMap();
