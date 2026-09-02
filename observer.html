@@ -640,6 +640,9 @@
 
       // ----- Route status -----
       if (data.route) {
+        // TEMP DEBUG - remove after diagnosis
+        console.log('[5C DEBUG - Observer] Received route data:', JSON.stringify(data.route));
+
         routeDot.className = 'dot ' + routeStatusToDotClass(data.route.status);
         routeLabel.textContent = data.route.status || 'Unknown';
 
@@ -653,7 +656,12 @@
         // STAGE 5C: sustained-deviation alert banner. Purely visual -
         // reads the single new alertActive field, doesn't touch any of
         // the distance/status fields or logic above.
-        deviationAlertBanner.style.display = data.route.alertActive ? 'flex' : 'none';
+        const shouldShowBanner = data.route.alertActive === true;
+        deviationAlertBanner.style.display = shouldShowBanner ? 'flex' : 'none';
+
+        // TEMP DEBUG - remove after diagnosis
+        console.log('[5C DEBUG - Observer] alertActive value:', data.route.alertActive,
+          '(type:', typeof data.route.alertActive, ') -> banner display set to:', deviationAlertBanner.style.display);
       }
 
       // ----- Last update timestamp -----
