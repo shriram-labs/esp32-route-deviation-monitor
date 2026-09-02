@@ -824,6 +824,23 @@
 
   // ----- Distance calculation helpers -----
 
+  // ===================================================================
+  // 5A: Distance display formatting (presentation only - does NOT affect
+  // any distance calculation, threshold comparison, or the deviation/
+  // geofence logic itself, which all continue to work in raw metres).
+  // < 500 m  -> shown in metres, e.g. "320 m"
+  // >= 500 m -> shown in km, e.g. "1.24 km"
+  // ===================================================================
+  function formatDistance(meters) {
+    if (meters === null || meters === undefined || isNaN(meters)) {
+      return '--';
+    }
+    if (meters < 500) {
+      return meters.toFixed(1) + ' m';
+    }
+    return (meters / 1000).toFixed(2) + ' km';
+  }
+
   // Haversine distance between two lat/lon points, in metres.
   function haversineDistance(lat1, lon1, lat2, lon2) {
     const R = 6371000; // Earth's radius in metres
@@ -1042,7 +1059,7 @@
       uploadDistanceFromRoute = distance;
 
       routeSub.innerHTML =
-        'Distance from route: ' + distance.toFixed(1) + ' m &nbsp; | &nbsp; GPS accuracy: ±' + accuracy.toFixed(1) + ' m<br>' +
+        'Distance from route: ' + formatDistance(distance) + ' &nbsp; | &nbsp; GPS accuracy: ±' + accuracy.toFixed(1) + ' m<br>' +
         'Enter threshold: ' + DEVIATION_ENTER_THRESHOLD_METERS + ' m &nbsp; Exit threshold: ' + DEVIATION_EXIT_THRESHOLD_METERS + ' m' +
         '<span style="color:#5a6070;">' + pendingNote + '</span>';
     }
@@ -1065,7 +1082,7 @@
         setRouteStatus('dot-reached', 'Destination Reached');
         routeSub.innerHTML =
           'Arrived within ' + DESTINATION_GEOFENCE_RADIUS_METERS + ' m of destination.<br>' +
-          '<span style="color:#5a6070;">Distance to destination: ' + distanceToDestination.toFixed(1) + ' m</span>';
+          '<span style="color:#5a6070;">Distance to destination: ' + formatDistance(distanceToDestination) + '</span>';
 
         // Stage 4B: capture for upload
         uploadRouteStatus = 'Destination Reached';
@@ -1073,7 +1090,7 @@
         // Not yet reached - show distance-to-destination as an extra
         // line under the existing deviation info, without replacing it.
         routeSub.innerHTML +=
-          '<br><span style="color:#5a6070;">Distance to destination: ' + distanceToDestination.toFixed(1) + ' m (arrival within ' +
+          '<br><span style="color:#5a6070;">Distance to destination: ' + formatDistance(distanceToDestination) + ' (arrival within ' +
           DESTINATION_GEOFENCE_RADIUS_METERS + ' m)</span>';
       }
 
