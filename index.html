@@ -364,6 +364,12 @@
       <strong style="color:#eaeaea; font-size:20px; letter-spacing:2px;" id="tripPinDisplay">--</strong>
     </div>
     <div class="status-sub" style="color:#5a6070;">Share both values with your trusted observer. Both are required to view this trip.</div>
+
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <button id="shareTripBtn" style="flex:1; padding:11px; font-size:13px; background-color:#2563eb; color:#ffffff;">SHARE TRIP LINK</button>
+      <button id="copyDetailsBtn" style="flex:1; padding:11px; font-size:13px; background-color:#2a2d35; color:#cfd3da;">COPY DETAILS</button>
+    </div>
+    <div class="status-sub" id="shareStatusText" style="color:#5a6070; margin-top:6px;"></div>
   </div>
 
   <!-- ===== Firebase Status Card (Stage 4A) ===== -->
@@ -400,8 +406,14 @@
     set,
     get,
     update,
-    push
+    push,
+    onValue
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+  import {
+    getFirestore,
+    collection,
+    addDoc
+  } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyCjsfXED3CN07XjWXAhUNSzMm4TpGU9c1U",
@@ -427,6 +439,13 @@
   try {
     const app = initializeApp(firebaseConfig);
     const database = getDatabase(app);
+
+    // STAGE 5E: separate Firestore instance, used ONLY for writing outgoing
+    // email-alert documents to a 'mail' collection that the Firebase
+    // "Trigger Email" extension watches. This does not touch or replace
+    // any Realtime Database structure (trips/<tripId>/<pin>/...) used
+    // everywhere else in this file - it's isolated, additive infrastructure.
+    const firestoreDb = getFirestore(app);
 
     // Write a small heartbeat value to a test path, then read it back,
     // to confirm both write and read access work with current database
@@ -527,6 +546,69 @@
       }
     };
 
+    // ===================================================================
+    // STAGE 5E: read (not write) the observer's email once it's been
+    // submitted from observer.html. This is the ONE place the traveler
+    // side reads from Firebase rather than only writing - everything
+    // else in this file remains write-only, as before.
+    //
+    // Returns an unsubscribe function (mirrors Firebase's own onValue
+    // return value) so the caller can detach the listener when a trip
+    // ends or a new one starts.
+    // ===================================================================
+    window.listenForObserverEmail = function (tripId, pin, onEmailKnown) {
+      if (!tripId || !pin) {
+        return function () {}; // no-op unsubscribe
+      }
+      try {
+        const emailRef = ref(database, 'trips/' + tripId + '/' + pin + '/observerEmail');
+        const unsubscribe = onValue(emailRef, function (snapshot) {
+          const email = snapshot.val();
+          if (email) {
+            onEmailKnown(email);
+          }
+        }, function (err) {
+          console.warn('Firebase observer-email listener error:', err.message);
+        });
+        return unsubscribe;
+      } catch (err) {
+        console.warn('Firebase observer-email listener setup error:', err.message);
+        return function () {};
+      }
+    };
+
+    // ===================================================================
+    // STAGE 5E: write an outgoing email-alert document to Firestore's
+    // 'mail' collection. This is the ONLY thing this function does -
+    // it never calls any email API directly, and no email-service
+    // credentials exist anywhere in this file. Actual sending is handled
+    // entirely by the Firebase "Trigger Email" extension, configured
+    // separately in the Firebase console (SMTP credentials live there,
+    // encrypted, never in this code).
+    //
+    // Document shape follows that extension's expected schema:
+    // { to: [...], message: { subject, text, html } }
+    // ===================================================================
+    window.sendEmailAlertToFirebase = function (toEmail, subject, textBody, htmlBody) {
+      if (!toEmail) {
+        return;
+      }
+      try {
+        addDoc(collection(firestoreDb, 'mail'), {
+          to: [toEmail],
+          message: {
+            subject: subject,
+            text: textBody,
+            html: htmlBody
+          }
+        }).catch(function (err) {
+          console.warn('Email alert Firestore write failed:', err.message);
+        });
+      } catch (err) {
+        console.warn('Email alert Firestore write error:', err.message);
+      }
+    };
+
   } catch (err) {
     setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
 
@@ -539,6 +621,12 @@
       // Firebase unavailable - intentionally does nothing.
     };
     window.uploadTravelPathPointToFirebase = function () {
+      // Firebase unavailable - intentionally does nothing.
+    };
+    window.listenForObserverEmail = function () {
+      return function () {}; // no-op unsubscribe
+    };
+    window.sendEmailAlertToFirebase = function () {
       // Firebase unavailable - intentionally does nothing.
     };
   }
@@ -561,6 +649,68 @@
   const tripCredentialsCard = document.getElementById('tripCredentialsCard');
   const tripIdDisplay = document.getElementById('tripIdDisplay');
   const tripPinDisplay = document.getElementById('tripPinDisplay');
+  const shareTripBtn = document.getElementById('shareTripBtn');
+  const copyDetailsBtn = document.getElementById('copyDetailsBtn');
+  const shareStatusText = document.getElementById('shareStatusText');
+
+  // Builds the observer link containing ONLY the Trip ID - the PIN is
+  // deliberately excluded and must be shared/entered separately.
+  function buildTripShareLink() {
+    // Assumes observer.html sits alongside this file in the same folder,
+    // which matches how both files have been deployed together so far.
+    const observerUrl = new URL('observer.html', window.location.href);
+    observerUrl.searchParams.set('trip', currentTripId);
+    return observerUrl.toString();
+  }
+
+  async function handleShareTrip() {
+    if (!currentTripId) {
+      return;
+    }
+    const link = buildTripShareLink();
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Monitor my trip',
+          text: 'Track my trip live. You will still need the PIN shown on my screen: ' + currentTripPin,
+          url: link
+        });
+      } catch (err) {
+        // User cancelled the share sheet, or share failed - not an error
+        // worth surfacing loudly.
+      }
+    } else if (navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(link);
+        shareStatusText.textContent = 'Link copied (PIN not included - share it separately).';
+      } catch (err) {
+        shareStatusText.textContent = 'Could not copy link automatically. Link: ' + link;
+      }
+    } else {
+      shareStatusText.textContent = 'Link: ' + link;
+    }
+  }
+
+  async function handleCopyDetails() {
+    if (!currentTripId || !currentTripPin) {
+      return;
+    }
+    const text = 'Trip ID: ' + currentTripId + '\nPIN: ' + currentTripPin;
+    if (navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(text);
+        shareStatusText.textContent = 'Trip ID and PIN copied to clipboard.';
+      } catch (err) {
+        shareStatusText.textContent = 'Could not copy automatically. ' + text;
+      }
+    } else {
+      shareStatusText.textContent = text;
+    }
+  }
+
+  shareTripBtn.addEventListener('click', handleShareTrip);
+  copyDetailsBtn.addEventListener('click', handleCopyDetails);
 
   // ----- Stage 4D: Trip ID + PIN state -----
   // Generated fresh each time START MONITORING is pressed. Both values
@@ -974,6 +1124,101 @@
     lastAlertTime = null;
   }
 
+  // ===================================================================
+  // STAGE 5E: Email alert notifications
+  //
+  // This is a THIRD, independent layer - it only READS the results of
+  // Stage 5B (sustainedDeviationAlertActive) and Stage 5D (currentAlertTier,
+  // alertCount) after they've already been computed. It never modifies
+  // evaluateRouteState(), updateSustainedDeviationTracking(), or any
+  // tier/threshold/hysteresis logic. Its own reset function is separate
+  // from cancelSustainedDeviationTracking() above - called alongside it
+  // at the same call sites, not merged into it.
+  // ===================================================================
+
+  const EMAIL_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes, as agreed
+
+  // Ranks tiers so we can detect a genuine ESCALATION (not just "still
+  // deviated at the same severity").
+  const ALERT_TIER_RANK = { mild: 1, moderate: 2, severe: 3 };
+
+  let currentObserverEmail = null;         // latest known observer email for this trip
+  let observerEmailUnsubscribe = null;     // detach handle for the Firebase listener
+
+  let lastEmailSentTime = null;            // timestamp of the most recently sent email
+  let lastEmailedTier = null;              // the tier that the last sent email reported
+
+  // Called from the same 3 places cancelSustainedDeviationTracking() is
+  // called (destination reached, start/stop monitoring) - kept as a
+  // separate function rather than folded into that one, so Stage 5B/5D
+  // code is never touched by this stage.
+  function resetEmailAlertState() {
+    lastEmailedTier = null;
+    // Deliberately NOT resetting lastEmailSentTime here - the 5-minute
+    // cooldown is a global floor across episodes, not per-episode, so a
+    // brand new deviation right after a resolved one still can't spam.
+  }
+
+  // Decides whether an email should be sent right now, given the latest
+  // Stage 5B/5D results, and sends it via the Firestore mail collection
+  // if so. Called from handleSuccess() after both distanceFromRoute and
+  // destinationDistance are known.
+  function checkAndSendEmailAlert(params) {
+    if (!currentObserverEmail || !params.alertActive) {
+      // No email on file yet, or not currently in an active-alert state -
+      // nothing to send.
+      return;
+    }
+
+    const isFirstAlert = (params.alertCount === 1 && lastEmailedTier === null);
+    const isEscalation = (lastEmailedTier !== null &&
+      ALERT_TIER_RANK[params.alertTier] > ALERT_TIER_RANK[lastEmailedTier]);
+
+    if (!isFirstAlert && !isEscalation) {
+      // Same tier repeat, or count incremented within the same tier -
+      // explicitly excluded per the "not every repeated alert" requirement.
+      return;
+    }
+
+    const now = Date.now();
+    if (lastEmailSentTime !== null && (now - lastEmailSentTime) < EMAIL_COOLDOWN_MS) {
+      // Cooldown floor not yet elapsed - skip this occurrence entirely
+      // (no queuing), consistent with keeping this a simple, defensible
+      // dedup rule rather than a complex retry system.
+      return;
+    }
+
+    const severityLabel = params.alertTier.charAt(0).toUpperCase() + params.alertTier.slice(1);
+    const timestampText = new Date(now).toLocaleString();
+    const mapsLink = 'https://www.google.com/maps?q=' + params.lat + ',' + params.lon;
+
+    const subject = severityLabel + ' Route Deviation Alert - #' + params.alertCount;
+
+    const textBody =
+      'Severity: ' + severityLabel + '\n' +
+      'Alert #: ' + params.alertCount + '\n' +
+      'Distance from route: ' + params.distanceFromRoute.toFixed(1) + ' m\n' +
+      (params.destinationDistance !== null ? 'Distance to destination: ' + params.destinationDistance.toFixed(1) + ' m\n' : '') +
+      'Time: ' + timestampText + '\n' +
+      'Coordinates: ' + params.lat.toFixed(6) + ', ' + params.lon.toFixed(6) + '\n' +
+      'Map link: ' + mapsLink;
+
+    const htmlBody =
+      '<p><strong>' + severityLabel + ' Route Deviation Alert - #' + params.alertCount + '</strong></p>' +
+      '<p>Distance from route: ' + params.distanceFromRoute.toFixed(1) + ' m<br>' +
+      (params.destinationDistance !== null ? ('Distance to destination: ' + params.destinationDistance.toFixed(1) + ' m<br>') : '') +
+      'Time: ' + timestampText + '<br>' +
+      'Coordinates: ' + params.lat.toFixed(6) + ', ' + params.lon.toFixed(6) + '</p>' +
+      '<p><a href="' + mapsLink + '">View current location on map</a></p>';
+
+    if (typeof window.sendEmailAlertToFirebase === 'function') {
+      window.sendEmailAlertToFirebase(currentObserverEmail, subject, textBody, htmlBody);
+    }
+
+    lastEmailSentTime = now;
+    lastEmailedTier = params.alertTier;
+  }
+
   // ----- Distance calculation helpers -----
 
   // ===================================================================
@@ -1235,6 +1480,9 @@
         // timer moot - cancel it rather than letting an alert fire after
         // the trip has effectively ended.
         cancelSustainedDeviationTracking();
+
+        // STAGE 5E: separate reset, doesn't touch the function above.
+        resetEmailAlertState();
       }
 
       if (destinationReached) {
@@ -1257,6 +1505,20 @@
 
       // Stage 4B: capture destination distance for upload regardless of reached state
       uploadDestinationDistance = distanceToDestination;
+
+      // STAGE 5E: evaluate whether an email alert should be sent, using
+      // the already-computed Stage 5B/5D results. This runs every reading
+      // (not throttled to the 5-second Firebase upload), but the function
+      // itself enforces the 5-minute cooldown internally.
+      checkAndSendEmailAlert({
+        alertActive: sustainedDeviationAlertActive,
+        alertTier: currentAlertTier,
+        alertCount: alertCount,
+        distanceFromRoute: uploadDistanceFromRoute,
+        destinationDistance: uploadDestinationDistance,
+        lat: lat,
+        lon: lon
+      });
     }
 
     // ===================================================================
@@ -1353,6 +1615,9 @@
     // should carry over from a previous session
     cancelSustainedDeviationTracking();
 
+    // STAGE 5E: separate reset, doesn't touch the function above.
+    resetEmailAlertState();
+
     // Stage 4B: reset upload throttle so the first reading of a new
     // session uploads promptly rather than waiting out an old timer
     lastFirebaseUploadTime = 0;
@@ -1367,6 +1632,22 @@
     tripIdDisplay.textContent = currentTripId;
     tripPinDisplay.textContent = currentTripPin;
     tripCredentialsCard.style.display = 'block';
+    shareStatusText.textContent = '';
+
+    // STAGE 5E: start listening for the observer's email as soon as this
+    // trip has a Trip ID/PIN. Detach any listener from a previous trip
+    // first, and reset the locally-known email so a stale value from a
+    // prior session can't be used for a new one.
+    if (observerEmailUnsubscribe !== null) {
+      observerEmailUnsubscribe();
+      observerEmailUnsubscribe = null;
+    }
+    currentObserverEmail = null;
+    if (typeof window.listenForObserverEmail === 'function') {
+      observerEmailUnsubscribe = window.listenForObserverEmail(currentTripId, currentTripPin, function (email) {
+        currentObserverEmail = email;
+      });
+    }
 
     // If pickup/destination/route were already set before this trip
     // started (the normal flow: SET LOCATIONS, then START MONITORING),
@@ -1414,6 +1695,17 @@
     // Stage 5B: a stopped trip shouldn't leave a deviation timer/alert
     // active for whenever monitoring is next started
     cancelSustainedDeviationTracking();
+
+    // STAGE 5E: separate reset, doesn't touch the function above.
+    resetEmailAlertState();
+
+    // Detach the observer-email listener - a stopped trip shouldn't keep
+    // listening in the background, and a new trip will attach its own.
+    if (observerEmailUnsubscribe !== null) {
+      observerEmailUnsubscribe();
+      observerEmailUnsubscribe = null;
+    }
+    currentObserverEmail = null;
 
     // Stage 3C: remove the live position marker but keep the route line visible.
     removeLiveMarkerFromMap();
