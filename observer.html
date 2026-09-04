@@ -250,6 +250,11 @@
       <input type="text" id="tripPinInput" placeholder="6-digit PIN" maxlength="6" inputmode="numeric">
     </div>
 
+    <div class="field-group">
+      <label for="observerEmailInput">Your Email (private - not shown publicly)</label>
+      <input type="email" id="observerEmailInput" placeholder="you@example.com">
+    </div>
+
     <button id="monitorBtn">MONITOR TRIP</button>
 
     <div class="trip-error" id="tripEntryError"></div>
@@ -337,7 +342,8 @@
   import {
     getDatabase,
     ref,
-    onValue
+    onValue,
+    update
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
 
   // Same Firebase project as route_monitor.html - both files must point
@@ -534,9 +540,23 @@
   const tripEntryCard = document.getElementById('tripEntryCard');
   const tripIdInput = document.getElementById('tripIdInput');
   const tripPinInput = document.getElementById('tripPinInput');
+  const observerEmailInput = document.getElementById('observerEmailInput');
   const monitorBtn = document.getElementById('monitorBtn');
   const tripEntryError = document.getElementById('tripEntryError');
   const dashboardContainer = document.getElementById('dashboardContainer');
+
+  // Pre-fill Trip ID from a shared link like observer.html?trip=TRIP_ID.
+  // The PIN is deliberately never included in a shareable link, so it's
+  // still left for the observer to enter manually/privately, along with
+  // their email.
+  (function prefillTripIdFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const sharedTripId = params.get('trip');
+    if (sharedTripId) {
+      tripIdInput.value = sharedTripId;
+      tripPinInput.focus(); // Trip ID is filled in, so guide focus to the next field
+    }
+  })();
 
   function showTripEntryError(message) {
     tripEntryError.style.display = 'block';
@@ -579,6 +599,7 @@
 
     const tripId = tripIdInput.value.trim();
     const pin = tripPinInput.value.trim();
+    const observerEmail = observerEmailInput.value.trim();
 
     if (!tripId || !pin) {
       showTripEntryError('Please enter both a Trip ID and a PIN.');
@@ -587,6 +608,11 @@
 
     if (!/^\d{4,6}$/.test(pin)) {
       showTripEntryError('PIN should be the 4-6 digit code shown on the traveler\'s device.');
+      return;
+    }
+
+    if (!observerEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(observerEmail)) {
+      showTripEntryError('Please enter a valid email address - it stays private and is only used for alert notifications.');
       return;
     }
 
@@ -599,6 +625,17 @@
     monitorBtn.textContent = 'CONNECTING...';
 
     const tripRef = ref(database, 'trips/' + tripId + '/' + pin);
+
+    // Write the observer's email once, alongside joining the trip. This
+    // is a private field - it is never displayed back in this UI or
+    // written anywhere public-facing, and the traveler's page only ever
+    // reads it (never displays it either) to know where to send alerts.
+    update(tripRef, { observerEmail: observerEmail }).catch(function (err) {
+      console.warn('Could not save observer email:', err.message);
+      // Not fatal - still proceed to join and view the trip even if this
+      // particular write failed; email alerts just won't have a
+      // recipient until it succeeds on a retry.
+    });
 
     // onValue fires immediately with current data, then again every time
     // the data changes - this is what makes the dashboard "live" without
