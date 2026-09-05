@@ -409,11 +409,6 @@
     push,
     onValue
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
-  import {
-    getFirestore,
-    collection,
-    addDoc
-  } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyCjsfXED3CN07XjWXAhUNSzMm4TpGU9c1U",
@@ -439,13 +434,6 @@
   try {
     const app = initializeApp(firebaseConfig);
     const database = getDatabase(app);
-
-    // STAGE 5E: separate Firestore instance, used ONLY for writing outgoing
-    // email-alert documents to a 'mail' collection that the Firebase
-    // "Trigger Email" extension watches. This does not touch or replace
-    // any Realtime Database structure (trips/<tripId>/<pin>/...) used
-    // everywhere else in this file - it's isolated, additive infrastructure.
-    const firestoreDb = getFirestore(app);
 
     // Write a small heartbeat value to a test path, then read it back,
     // to confirm both write and read access work with current database
@@ -546,69 +534,6 @@
       }
     };
 
-    // ===================================================================
-    // STAGE 5E: read (not write) the observer's email once it's been
-    // submitted from observer.html. This is the ONE place the traveler
-    // side reads from Firebase rather than only writing - everything
-    // else in this file remains write-only, as before.
-    //
-    // Returns an unsubscribe function (mirrors Firebase's own onValue
-    // return value) so the caller can detach the listener when a trip
-    // ends or a new one starts.
-    // ===================================================================
-    window.listenForObserverEmail = function (tripId, pin, onEmailKnown) {
-      if (!tripId || !pin) {
-        return function () {}; // no-op unsubscribe
-      }
-      try {
-        const emailRef = ref(database, 'trips/' + tripId + '/' + pin + '/observerEmail');
-        const unsubscribe = onValue(emailRef, function (snapshot) {
-          const email = snapshot.val();
-          if (email) {
-            onEmailKnown(email);
-          }
-        }, function (err) {
-          console.warn('Firebase observer-email listener error:', err.message);
-        });
-        return unsubscribe;
-      } catch (err) {
-        console.warn('Firebase observer-email listener setup error:', err.message);
-        return function () {};
-      }
-    };
-
-    // ===================================================================
-    // STAGE 5E: write an outgoing email-alert document to Firestore's
-    // 'mail' collection. This is the ONLY thing this function does -
-    // it never calls any email API directly, and no email-service
-    // credentials exist anywhere in this file. Actual sending is handled
-    // entirely by the Firebase "Trigger Email" extension, configured
-    // separately in the Firebase console (SMTP credentials live there,
-    // encrypted, never in this code).
-    //
-    // Document shape follows that extension's expected schema:
-    // { to: [...], message: { subject, text, html } }
-    // ===================================================================
-    window.sendEmailAlertToFirebase = function (toEmail, subject, textBody, htmlBody) {
-      if (!toEmail) {
-        return;
-      }
-      try {
-        addDoc(collection(firestoreDb, 'mail'), {
-          to: [toEmail],
-          message: {
-            subject: subject,
-            text: textBody,
-            html: htmlBody
-          }
-        }).catch(function (err) {
-          console.warn('Email alert Firestore write failed:', err.message);
-        });
-      } catch (err) {
-        console.warn('Email alert Firestore write error:', err.message);
-      }
-    };
-
   } catch (err) {
     setFirebaseStatus('dot-error', 'Initialization Failed', 'Firebase failed to initialize: ' + err.message);
 
@@ -621,12 +546,6 @@
       // Firebase unavailable - intentionally does nothing.
     };
     window.uploadTravelPathPointToFirebase = function () {
-      // Firebase unavailable - intentionally does nothing.
-    };
-    window.listenForObserverEmail = function () {
-      return function () {}; // no-op unsubscribe
-    };
-    window.sendEmailAlertToFirebase = function () {
       // Firebase unavailable - intentionally does nothing.
     };
   }
@@ -1136,43 +1055,57 @@
   // at the same call sites, not merged into it.
   // ===================================================================
 
-  const EMAIL_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes, as agreed
+  const PUSH_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes, as agreed
 
   // Ranks tiers so we can detect a genuine ESCALATION (not just "still
   // deviated at the same severity").
   const ALERT_TIER_RANK = { mild: 1, moderate: 2, severe: 3 };
 
-  let currentObserverEmail = null;         // latest known observer email for this trip
-  let observerEmailUnsubscribe = null;     // detach handle for the Firebase listener
+  // ===================================================================
+  // WEB PUSH: replaces the old Firestore/email alert path. index.html
+  // no longer needs to know anything about the observer (no email, no
+  // subscription lookup) - it just POSTs the deviation details to the
+  // Vercel function below, which reads the observer's push subscription
+  // from RTDB itself (via the Admin SDK) and sends the actual push.
+  // If no observer has enabled notifications yet, the Vercel function
+  // simply does nothing - this fetch never blocks or affects GPS
+  // tracking, deviation detection, or the map either way.
+  //
+  // Replace this with your deployed Vercel function's URL.
+  // ===================================================================
+  const PUSH_NOTIFY_ENDPOINT = 'https://YOUR-VERCEL-PROJECT.vercel.app/api/notify-observer';
 
-  let lastEmailSentTime = null;            // timestamp of the most recently sent email
-  let lastEmailedTier = null;              // the tier that the last sent email reported
+  let lastPushSentTime = null;             // timestamp of the most recently sent push
+  let lastNotifiedTier = null;             // the tier that the last sent push reported
 
   // Called from the same 3 places cancelSustainedDeviationTracking() is
   // called (destination reached, start/stop monitoring) - kept as a
   // separate function rather than folded into that one, so Stage 5B/5D
   // code is never touched by this stage.
-  function resetEmailAlertState() {
-    lastEmailedTier = null;
-    // Deliberately NOT resetting lastEmailSentTime here - the 5-minute
+  function resetPushAlertState() {
+    lastNotifiedTier = null;
+    // Deliberately NOT resetting lastPushSentTime here - the 5-minute
     // cooldown is a global floor across episodes, not per-episode, so a
     // brand new deviation right after a resolved one still can't spam.
   }
 
-  // Decides whether an email should be sent right now, given the latest
-  // Stage 5B/5D results, and sends it via the Firestore mail collection
-  // if so. Called from handleSuccess() after both distanceFromRoute and
-  // destinationDistance are known.
-  function checkAndSendEmailAlert(params) {
-    if (!currentObserverEmail || !params.alertActive) {
-      // No email on file yet, or not currently in an active-alert state -
+  // Decides whether a push notification should be sent right now, given
+  // the latest Stage 5B/5D results, and POSTs to the Vercel notify
+  // endpoint if so. Called from handleSuccess() after both
+  // distanceFromRoute and destinationDistance are known. Note: the PIN
+  // is included here only so the Vercel function can look up the right
+  // RTDB path server-side - it is never put in the push payload the
+  // browser/OS actually displays (see service-worker.js).
+  function checkAndSendPushAlert(params) {
+    if (!params.alertActive || !currentTripId || !currentTripPin) {
+      // Not currently in an active-alert state, or no trip in progress -
       // nothing to send.
       return;
     }
 
-    const isFirstAlert = (params.alertCount === 1 && lastEmailedTier === null);
-    const isEscalation = (lastEmailedTier !== null &&
-      ALERT_TIER_RANK[params.alertTier] > ALERT_TIER_RANK[lastEmailedTier]);
+    const isFirstAlert = (params.alertCount === 1 && lastNotifiedTier === null);
+    const isEscalation = (lastNotifiedTier !== null &&
+      ALERT_TIER_RANK[params.alertTier] > ALERT_TIER_RANK[lastNotifiedTier]);
 
     if (!isFirstAlert && !isEscalation) {
       // Same tier repeat, or count incremented within the same tier -
@@ -1181,42 +1114,34 @@
     }
 
     const now = Date.now();
-    if (lastEmailSentTime !== null && (now - lastEmailSentTime) < EMAIL_COOLDOWN_MS) {
+    if (lastPushSentTime !== null && (now - lastPushSentTime) < PUSH_COOLDOWN_MS) {
       // Cooldown floor not yet elapsed - skip this occurrence entirely
       // (no queuing), consistent with keeping this a simple, defensible
       // dedup rule rather than a complex retry system.
       return;
     }
 
-    const severityLabel = params.alertTier.charAt(0).toUpperCase() + params.alertTier.slice(1);
-    const timestampText = new Date(now).toLocaleString();
-    const mapsLink = 'https://www.google.com/maps?q=' + params.lat + ',' + params.lon;
+    fetch(PUSH_NOTIFY_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tripId: currentTripId,
+        pin: currentTripPin,
+        severity: params.alertTier,
+        alertCount: params.alertCount,
+        distanceFromRoute: params.distanceFromRoute,
+        destinationDistance: params.destinationDistance,
+        lat: params.lat,
+        lon: params.lon
+      })
+    }).catch(function (err) {
+      // Never let a push-notify failure disrupt GPS tracking or the UI -
+      // same defensive posture as every other Firebase call in this file.
+      console.warn('Push notification request failed:', err.message);
+    });
 
-    const subject = severityLabel + ' Route Deviation Alert - #' + params.alertCount;
-
-    const textBody =
-      'Severity: ' + severityLabel + '\n' +
-      'Alert #: ' + params.alertCount + '\n' +
-      'Distance from route: ' + params.distanceFromRoute.toFixed(1) + ' m\n' +
-      (params.destinationDistance !== null ? 'Distance to destination: ' + params.destinationDistance.toFixed(1) + ' m\n' : '') +
-      'Time: ' + timestampText + '\n' +
-      'Coordinates: ' + params.lat.toFixed(6) + ', ' + params.lon.toFixed(6) + '\n' +
-      'Map link: ' + mapsLink;
-
-    const htmlBody =
-      '<p><strong>' + severityLabel + ' Route Deviation Alert - #' + params.alertCount + '</strong></p>' +
-      '<p>Distance from route: ' + params.distanceFromRoute.toFixed(1) + ' m<br>' +
-      (params.destinationDistance !== null ? ('Distance to destination: ' + params.destinationDistance.toFixed(1) + ' m<br>') : '') +
-      'Time: ' + timestampText + '<br>' +
-      'Coordinates: ' + params.lat.toFixed(6) + ', ' + params.lon.toFixed(6) + '</p>' +
-      '<p><a href="' + mapsLink + '">View current location on map</a></p>';
-
-    if (typeof window.sendEmailAlertToFirebase === 'function') {
-      window.sendEmailAlertToFirebase(currentObserverEmail, subject, textBody, htmlBody);
-    }
-
-    lastEmailSentTime = now;
-    lastEmailedTier = params.alertTier;
+    lastPushSentTime = now;
+    lastNotifiedTier = params.alertTier;
   }
 
   // ----- Distance calculation helpers -----
@@ -1481,8 +1406,8 @@
         // the trip has effectively ended.
         cancelSustainedDeviationTracking();
 
-        // STAGE 5E: separate reset, doesn't touch the function above.
-        resetEmailAlertState();
+        // Separate reset, doesn't touch the function above.
+        resetPushAlertState();
       }
 
       if (destinationReached) {
@@ -1506,11 +1431,11 @@
       // Stage 4B: capture destination distance for upload regardless of reached state
       uploadDestinationDistance = distanceToDestination;
 
-      // STAGE 5E: evaluate whether an email alert should be sent, using
-      // the already-computed Stage 5B/5D results. This runs every reading
+      // Evaluate whether a push notification should be sent, using the
+      // already-computed Stage 5B/5D results. This runs every reading
       // (not throttled to the 5-second Firebase upload), but the function
       // itself enforces the 5-minute cooldown internally.
-      checkAndSendEmailAlert({
+      checkAndSendPushAlert({
         alertActive: sustainedDeviationAlertActive,
         alertTier: currentAlertTier,
         alertCount: alertCount,
@@ -1615,8 +1540,8 @@
     // should carry over from a previous session
     cancelSustainedDeviationTracking();
 
-    // STAGE 5E: separate reset, doesn't touch the function above.
-    resetEmailAlertState();
+    // Separate reset, doesn't touch the function above.
+    resetPushAlertState();
 
     // Stage 4B: reset upload throttle so the first reading of a new
     // session uploads promptly rather than waiting out an old timer
@@ -1634,20 +1559,10 @@
     tripCredentialsCard.style.display = 'block';
     shareStatusText.textContent = '';
 
-    // STAGE 5E: start listening for the observer's email as soon as this
-    // trip has a Trip ID/PIN. Detach any listener from a previous trip
-    // first, and reset the locally-known email so a stale value from a
-    // prior session can't be used for a new one.
-    if (observerEmailUnsubscribe !== null) {
-      observerEmailUnsubscribe();
-      observerEmailUnsubscribe = null;
-    }
-    currentObserverEmail = null;
-    if (typeof window.listenForObserverEmail === 'function') {
-      observerEmailUnsubscribe = window.listenForObserverEmail(currentTripId, currentTripPin, function (email) {
-        currentObserverEmail = email;
-      });
-    }
+    // Note: unlike the old email flow, nothing needs to be attached here
+    // for push notifications - the Vercel notify function looks up the
+    // observer's subscription from RTDB itself when a deviation alert
+    // fires, using the Trip ID + PIN sent in checkAndSendPushAlert().
 
     // If pickup/destination/route were already set before this trip
     // started (the normal flow: SET LOCATIONS, then START MONITORING),
@@ -1696,16 +1611,8 @@
     // active for whenever monitoring is next started
     cancelSustainedDeviationTracking();
 
-    // STAGE 5E: separate reset, doesn't touch the function above.
-    resetEmailAlertState();
-
-    // Detach the observer-email listener - a stopped trip shouldn't keep
-    // listening in the background, and a new trip will attach its own.
-    if (observerEmailUnsubscribe !== null) {
-      observerEmailUnsubscribe();
-      observerEmailUnsubscribe = null;
-    }
-    currentObserverEmail = null;
+    // Separate reset, doesn't touch the function above.
+    resetPushAlertState();
 
     // Stage 3C: remove the live position marker but keep the route line visible.
     removeLiveMarkerFromMap();
