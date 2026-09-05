@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Observer Dashboard</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0f1115">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
   /* Styling intentionally mirrors route_monitor.html for a consistent look */
@@ -251,8 +253,8 @@
     </div>
 
     <div class="field-group">
-      <label for="observerEmailInput">Your Email (private - not shown publicly)</label>
-      <input type="email" id="observerEmailInput" placeholder="you@example.com">
+      <label>Notifications</label>
+      <div class="status-sub" id="pushStatusText" style="margin-top:0;">Push notifications will be requested when you tap MONITOR TRIP.</div>
     </div>
 
     <button id="monitorBtn">MONITOR TRIP</button>
@@ -389,6 +391,72 @@
   function showError(message) {
     errorBox.style.display = 'block';
     errorBox.textContent = message;
+  }
+
+  // ===================================================================
+  // WEB PUSH: replaces the old email-based alert flow. Instead of
+  // collecting an email address, we register a Service Worker, ask for
+  // notification permission, subscribe to Web Push, and store the
+  // resulting subscription object at trips/<tripId>/<pin>/pushSubscription
+  // - the same RTDB path route_monitor.html already reads/writes to.
+  // A Vercel function (outside this file) reads that subscription and
+  // sends the actual push when a deviation alert fires.
+  // ===================================================================
+
+  // Replace with the VAPID public key generated via `web-push generate-vapid-keys`.
+  const VAPID_PUBLIC_KEY = 'BJeocnbG6f3URWxXrQKxgmYp7qmW3WAhtY1g4YaFQ0laoD7bvnlcs6TgZIKCHC3C7EGj-RRxdvPlqisfHfm54OY';
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; i++) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  }
+
+  function setPushStatus(message) {
+    if (pushStatusText) {
+      pushStatusText.textContent = message;
+    }
+  }
+
+  // Registers the Service Worker, requests notification permission, and
+  // subscribes this browser to Web Push, then stores the subscription in
+  // RTDB. Deliberately never throws or blocks the trip join below - a
+  // denied permission or unsupported browser just means the observer
+  // relies on the live dashboard instead of native notifications.
+  async function enablePushNotifications(tripId, pin) {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setPushStatus('Push notifications are not supported in this browser - you can still view live updates on this page.');
+      return;
+    }
+    try {
+      const registration = await navigator.serviceWorker.register('service-worker.js');
+      const permission = await Notification.requestPermission();
+
+      if (permission !== 'granted') {
+        setPushStatus('Notifications not enabled - you can still view live updates on this page.');
+        return;
+      }
+
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+        });
+      }
+
+      const tripRef = ref(database, 'trips/' + tripId + '/' + pin);
+      await update(tripRef, { pushSubscription: subscription.toJSON() });
+      setPushStatus('Push notifications enabled for this trip.');
+    } catch (err) {
+      console.warn('Push notification setup failed:', err.message);
+      setPushStatus('Could not enable push notifications: ' + err.message);
+    }
   }
 
   // ----- Map state -----
@@ -540,15 +608,18 @@
   const tripEntryCard = document.getElementById('tripEntryCard');
   const tripIdInput = document.getElementById('tripIdInput');
   const tripPinInput = document.getElementById('tripPinInput');
-  const observerEmailInput = document.getElementById('observerEmailInput');
+  const pushStatusText = document.getElementById('pushStatusText');
   const monitorBtn = document.getElementById('monitorBtn');
   const tripEntryError = document.getElementById('tripEntryError');
   const dashboardContainer = document.getElementById('dashboardContainer');
 
   // Pre-fill Trip ID from a shared link like observer.html?trip=TRIP_ID.
   // The PIN is deliberately never included in a shareable link, so it's
-  // still left for the observer to enter manually/privately, along with
-  // their email.
+  // still left for the observer to enter manually/privately here. (A
+  // separate auto-join check, further below - after Firebase/`database`
+  // is ready - looks for a locally cached PIN and joins automatically
+  // when one is found; this early prefill just covers the fallback
+  // manual-entry path.)
   (function prefillTripIdFromUrl() {
     const params = new URLSearchParams(window.location.search);
     const sharedTripId = params.get('trip');
@@ -585,6 +656,38 @@
   }
 
   // ===================================================================
+  // Auto-join from a cached PIN (push notification tap flow).
+  //
+  // If the URL carries ?trip=TRIP_ID (from prefillTripIdFromUrl above)
+  // AND this exact Trip ID has a PIN cached in localStorage from a
+  // previous successful join on THIS device, fill it in and join
+  // immediately - this is what lets tapping a push notification open
+  // the trip in one step, with no PIN in the URL or notification at
+  // any point. If no cached PIN is found, this does nothing and the
+  // observer falls back to the normal manual PIN entry.
+  // ===================================================================
+  (function tryAutoJoinFromCachedPin() {
+    const params = new URLSearchParams(window.location.search);
+    const sharedTripId = params.get('trip');
+    if (!sharedTripId) {
+      return;
+    }
+
+    let cachedPin = null;
+    try {
+      cachedPin = localStorage.getItem('observerTrip_' + sharedTripId);
+    } catch (err) {
+      cachedPin = null; // storage unavailable - fall back to manual entry
+    }
+
+    if (cachedPin) {
+      tripIdInput.value = sharedTripId;
+      tripPinInput.value = cachedPin;
+      handleMonitorTrip(); // function declaration - hoisted, safe to call here
+    }
+  })();
+
+  // ===================================================================
   // STAGE 4D: Join a specific trip by Trip ID + PIN.
   //
   // Reads from 'trips/<tripId>/<pin>' - the SAME path the traveler
@@ -599,7 +702,6 @@
 
     const tripId = tripIdInput.value.trim();
     const pin = tripPinInput.value.trim();
-    const observerEmail = observerEmailInput.value.trim();
 
     if (!tripId || !pin) {
       showTripEntryError('Please enter both a Trip ID and a PIN.');
@@ -608,11 +710,6 @@
 
     if (!/^\d{4,6}$/.test(pin)) {
       showTripEntryError('PIN should be the 4-6 digit code shown on the traveler\'s device.');
-      return;
-    }
-
-    if (!observerEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(observerEmail)) {
-      showTripEntryError('Please enter a valid email address - it stays private and is only used for alert notifications.');
       return;
     }
 
@@ -626,16 +723,11 @@
 
     const tripRef = ref(database, 'trips/' + tripId + '/' + pin);
 
-    // Write the observer's email once, alongside joining the trip. This
-    // is a private field - it is never displayed back in this UI or
-    // written anywhere public-facing, and the traveler's page only ever
-    // reads it (never displays it either) to know where to send alerts.
-    update(tripRef, { observerEmail: observerEmail }).catch(function (err) {
-      console.warn('Could not save observer email:', err.message);
-      // Not fatal - still proceed to join and view the trip even if this
-      // particular write failed; email alerts just won't have a
-      // recipient until it succeeds on a retry.
-    });
+    // Register for Web Push and store the subscription alongside this
+    // trip. Not fatal if it fails (denied permission, unsupported
+    // browser, etc.) - the observer still proceeds to view the live
+    // dashboard below either way.
+    enablePushNotifications(tripId, pin);
 
     // onValue fires immediately with current data, then again every time
     // the data changes - this is what makes the dashboard "live" without
@@ -649,6 +741,19 @@
         // cases without extra plumbing, so we show one honest message.
         showTripEntryError('No trip data found for this Trip ID/PIN yet. Double-check both values, or wait for the traveler to press Start Monitoring.');
         return;
+      }
+
+      // Valid data found - this confirms the Trip ID + PIN pair is
+      // correct. Cache it in localStorage (this device only) so that
+      // tapping a push notification later - which links to
+      // observer.html?trip=<tripId> with NO pin in the URL - can
+      // reopen this exact trip without asking for the PIN again.
+      try {
+        localStorage.setItem('observerTrip_' + tripId, pin);
+      } catch (err) {
+        // Storage unavailable (private browsing, quota, etc.) - not
+        // fatal, the observer just re-enters the PIN next time.
+        console.warn('Could not cache trip credentials locally:', err.message);
       }
 
       // Valid data found - show the dashboard and hide the entry form.
